@@ -84,6 +84,35 @@ npm run dev:gw
   的 token 校验失败并退出，因此健康探测会把账号标记为 `stopped`/`error` → 网关返回 `503`。
 - 在网关上设置 `CPX_VERBOSE=1`，可在服务端日志中记录 `502` 背后真实的上游错误。
 
+## Token 计量
+
+网关的 `usage_logs` 表**每次调用记录一行**（谁 / 哪个账号 / 路径 / 模型 / HTTP 状态码 /
+时间戳）—— **不**存储 token 数量。可直接查询：
+
+```bash
+docker compose exec -T control-plane node -e "
+const db=require('better-sqlite3')('/app/data/cpx.db');
+console.table(db.prepare('SELECT id,user_id,account_id,path,model,status_code,created_at FROM usage_logs ORDER BY id DESC LIMIT 20').all());
+"
+```
+
+token 消耗本身由**上游模型在响应体里返回**，而不是由代理统计。具体读哪个字段取决于你调用的接口：
+
+| 接口 | 路径 | 响应 JSON 中的 token 字段 |
+| --- | --- | --- |
+| OpenAI Chat Completions | `/v1/chat/completions` | `usage.prompt_tokens`、`usage.completion_tokens`、`usage.total_tokens` |
+| OpenAI Responses | `/v1/responses` | `usage.input_tokens`、`usage.output_tokens`；另有 `copilot_usage.token_details[]`（按类型给出 `token_count`：`input` / `output` / `cache_read`）和 `copilot_usage.total_nano_aiu`（计费单位） |
+| Anthropic Messages | `/v1/messages` | `usage.input_tokens`、`usage.output_tokens`、`usage.cache_read_input_tokens`（缓存命中） |
+
+说明：
+- **流式**请求下，OpenAI 只有在你传了 `"stream_options": {"include_usage": true}` 时，
+  才会在最后一个 chunk 里带上 `usage`；Anthropic 默认会在 `message_delta` / 末尾事件里返回 usage。
+- 网关目前**不**把这些字段解析进数据库（它原样反向代理字节流）。若要按 token 计量，
+  要么让客户端自己读取每次响应里的 `usage`，要么扩展网关嗅探末尾的 `usage`，
+  并在 `usage_logs` 中新增 `prompt/completion/total` 列。
+- 该链路上 prompt caching 是真实生效的：配合 Anthropic 的 `cache_control`，热调用会显示
+  `cache_read_input_tokens` > 0，计费 input 降到只剩新增的 token。
+
 ## 说明 / 限制（demo 阶段）
 
 - 会话存储在内存中；重启 control-plane 会让用户登出。

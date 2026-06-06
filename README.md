@@ -92,6 +92,39 @@ Notes:
 - Set `CPX_VERBOSE=1` on the gateway to log (server-side only) the real upstream
   error behind a `502`.
 
+## Token metering
+
+The gateway's `usage_logs` table records **one row per call** (who / which account
+/ path / model / HTTP status / timestamp) — it does **not** store token counts.
+Inspect it directly:
+
+```bash
+docker compose exec -T control-plane node -e "
+const db=require('better-sqlite3')('/app/data/cpx.db');
+console.table(db.prepare('SELECT id,user_id,account_id,path,model,status_code,created_at FROM usage_logs ORDER BY id DESC LIMIT 20').all());
+"
+```
+
+Token consumption itself is reported by the **upstream model in the response body**,
+not by the proxy. Where to read it depends on the API surface you call:
+
+| API surface | Endpoint | Token fields in the JSON response |
+| --- | --- | --- |
+| OpenAI Chat Completions | `/v1/chat/completions` | `usage.prompt_tokens`, `usage.completion_tokens`, `usage.total_tokens` |
+| OpenAI Responses | `/v1/responses` | `usage.input_tokens`, `usage.output_tokens`; plus `copilot_usage.token_details[]` (per-type `token_count`: `input` / `output` / `cache_read`) and `copilot_usage.total_nano_aiu` (billing units) |
+| Anthropic Messages | `/v1/messages` | `usage.input_tokens`, `usage.output_tokens`, `usage.cache_read_input_tokens` (cache hits) |
+
+Notes:
+- For **streaming** requests, OpenAI only includes the `usage` block in the final
+  chunk if you send `"stream_options": {"include_usage": true}`. Anthropic emits
+  usage in the `message_delta` / final event by default.
+- The gateway does **not** currently parse these fields into the DB (it reverse-
+  proxies the byte stream as-is). To meter by token, either have clients read the
+  `usage` block from each response, or extend the gateway to sniff the trailing
+  `usage` and add `prompt/completion/total` columns to `usage_logs`.
+- Prompt caching is real on this path: with Anthropic `cache_control`, warm calls
+  show `cache_read_input_tokens` > 0 and billed input collapses to the new tokens.
+
 ## Notes / limits (demo)
 
 - Sessions are in-memory; restarting control-plane logs users out.
