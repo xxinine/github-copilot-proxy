@@ -1,0 +1,37 @@
+services:
+  control-plane:
+    build:
+      context: .
+      dockerfile: control-plane/Dockerfile
+    env_file: .env
+    environment:
+      CPX_DB_PATH: /app/data/cpx.db
+    ports:
+      - "${CPX_CONTROL_PLANE_PORT:-8080}:8080"
+    volumes:
+      - ./data:/app/data
+      # Manage sibling per-account proxy containers on the host daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - cpx-net
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    env_file: .env
+    environment:
+      CPX_DB_PATH: /app/data/cpx.db
+    ports:
+      - "${CPX_GATEWAY_PORT:-4000}:4000"
+    volumes:
+      - ./data:/app/data
+    networks:
+      - cpx-net
+    restart: unless-stopped
+
+networks:
+  cpx-net:
+    name: cpx-net
+    driver: bridge

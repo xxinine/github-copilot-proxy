@@ -1,0 +1,19 @@
+{
+  "name": "copilot-proxy-multitenant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "control-plane",
+    "gateway"
+  ],
+  "scripts": {
+    "dev:cp": "CPX_DB_PATH=\"$PWD/data/cpx.db\" npm -w control-plane run dev",
+    "dev:gw": "CPX_DB_PATH=\"$PWD/data/cpx.db\" npm -w gateway run dev",
+    "build": "npm -w control-plane run build && npm -w gateway run build"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
