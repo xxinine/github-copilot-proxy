@@ -9,6 +9,28 @@ gateway URL with their key and reach their own Copilot models.
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    client[API Client<br/>Bearer cpx-key]
+
+    subgraph host[Host · Docker]
+        gateway[gateway :4000<br/>shared endpoint]
+        cp[control-plane :8080<br/>web · binding · monitor]
+        db[(SQLite<br/>cpx.db)]
+        accts[cpx-acct-1..N<br/>copilot-proxy-api]
+    end
+
+    github[(GitHub Copilot)]
+
+    client --> gateway
+    gateway --> db
+    gateway --> accts
+    cp --> db
+    cp --> accts
+    cp --> github
+    accts --> github
+```
+
 - **control-plane** (`:8080`) — web platform: local login, admin user management,
   API-key management, GitHub device-flow binding. On bind it launches one
   `copilot-proxy-api` container per account (full OpenAI + Anthropic + Codex
@@ -22,6 +44,36 @@ gateway URL with their key and reach their own Copilot models.
   usage logs.
 
 GitHub tokens are encrypted at rest with AES-256-GCM using `CPX_MASTER_KEY`.
+
+### Request data flow
+
+A single client call resolves `key → user → account → container` (all SQLite
+lookups), then the gateway byte-streams the request to that account's upstream
+proxy and records one usage row when the response finishes.
+
+```mermaid
+sequenceDiagram
+    participant C as Client<br/>Bearer cpx-key
+    participant G as gateway :4000
+    participant DB as SQLite cpx.db
+    participant A as cpx-acct-N<br/>copilot-proxy-api :4141
+    participant GH as GitHub Copilot
+
+    C->>G: POST /v1/chat/completions<br/>Authorization: Bearer cpx-...
+    G->>G: extractKey() reads the key
+    G->>DB: findActiveKeyByHash(sha256(key))
+    DB-->>G: api_keys row → user_id
+    G->>DB: getUserById(user_id) (check status)
+    G->>DB: getAccountByUser(user_id) (container_name/status)
+    Note over G: Validate user not disabled & account.status == running
+    G->>G: Buffer body, parse model field
+    G->>A: Reverse-proxy to http://cpx-acct-N:4141
+    A->>GH: Request real upstream with internal Copilot token
+    GH-->>A: Model response (incl. SSE stream)
+    A-->>G: Pass through response
+    G-->>C: Stream back unchanged
+    G->>DB: On res.finish, logUsage(...)
+```
 
 ## Quick start
 

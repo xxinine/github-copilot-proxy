@@ -8,6 +8,28 @@
 
 ## 架构
 
+```mermaid
+flowchart LR
+    client[API 客户端<br/>Bearer cpx-key]
+
+    subgraph host[宿主机 · Docker]
+        gateway[gateway :4000<br/>共享 API 地址]
+        cp[control-plane :8080<br/>网页 · 绑定 · 健康探测]
+        db[(SQLite<br/>cpx.db)]
+        accts[cpx-acct-1..N<br/>copilot-proxy-api]
+    end
+
+    github[(GitHub Copilot)]
+
+    client --> gateway
+    gateway --> db
+    gateway --> accts
+    cp --> db
+    cp --> accts
+    cp --> github
+    accts --> github
+```
+
 - **control-plane（控制面，`:8080`）** — 平台网页：本地账号登录、管理员用户管理、
   API key 管理、GitHub 设备码绑定。绑定成功后会为每个账号启动一个
   `copilot-proxy-api` 容器（完整兼容 OpenAI + Anthropic + Codex，使用未修改的上游镜像）。
@@ -18,6 +40,36 @@
 - **SQLite（`./data/cpx.db`）** — 用户、哈希后的 API key、加密的 GitHub token、用量日志。
 
 GitHub token 使用 `CPX_MASTER_KEY` 通过 AES-256-GCM 加密存储。
+
+### 请求数据流
+
+一次客户端调用按 `key → 用户 → 账号 → 容器` 逐跳解析（全部是 SQLite 查询），
+然后网关把请求以字节流方式反向代理到该账号对应的上游代理容器，并在响应结束时
+记录一行用量日志。
+
+```mermaid
+sequenceDiagram
+    participant C as 客户端<br/>Bearer cpx-key
+    participant G as gateway :4000
+    participant DB as SQLite cpx.db
+    participant A as cpx-acct-N<br/>copilot-proxy-api :4141
+    participant GH as GitHub Copilot
+
+    C->>G: POST /v1/chat/completions<br/>Authorization: Bearer cpx-...
+    G->>G: extractKey() 取出 key
+    G->>DB: findActiveKeyByHash(sha256(key))
+    DB-->>G: api_keys 行 → user_id
+    G->>DB: getUserById(user_id)（校验 status）
+    G->>DB: getAccountByUser(user_id)（container_name/status）
+    Note over G: 校验用户未禁用 且 account.status == running
+    G->>G: 缓冲 body，解析 model 字段
+    G->>A: 反向代理到 http://cpx-acct-N:4141
+    A->>GH: 用内部 Copilot token 请求真正上游
+    GH-->>A: 模型响应（含 SSE 流）
+    A-->>G: 透传响应
+    G-->>C: 原样流式回传
+    G->>DB: res.finish 后 logUsage(...)
+```
 
 ## 快速开始
 
