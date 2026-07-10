@@ -3,6 +3,7 @@ import { cors } from "hono/cors"
 import { logger } from "hono/logger"
 
 import { cpxAuth } from "./cpx/auth"
+import { usageMiddleware } from "./cpx/usage-middleware"
 import { requestTraceMiddleware } from "./lib/request-trace"
 import { completionRoutes } from "./routes/chat-completions/route"
 import { debugRoutes } from "./routes/debug/route"
@@ -22,6 +23,8 @@ server.use(requestTraceMiddleware)
 server.get("/", (c) => c.text("Server running"))
 
 server.use(cpxAuth)
+
+server.use(usageMiddleware)
 
 server.route("/chat/completions", completionRoutes)
 server.route("/debug", debugRoutes)

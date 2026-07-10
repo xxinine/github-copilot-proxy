@@ -71,7 +71,7 @@ sequenceDiagram
     C->>P: POST /v1/chat/completions<br/>Authorization: Bearer cpx-...
     P->>DB: resolveTenant(sha256(key)) → user + account (readonly)
     Note over P: Reject if key invalid (401), user disabled / unbound (403)
-    P->>P: Decrypt GitHub token; mint or reuse cached Copilot token
+    P->>P: Decrypt GitHub token, mint or reuse cached Copilot token
     P->>GH: Forward with tenant's Copilot token (translation as needed)
     GH-->>P: Model response (incl. SSE stream)
     P-->>C: Stream back unchanged
@@ -105,6 +105,10 @@ curl http://localhost:4000/v1/chat/completions \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
 ```
 
+6. Watch consumption under **Dashboard → Usage & stats**, or fire test requests
+   straight from the browser on **Dashboard → Client examples** (pick a model,
+   Send). Admins get a global view under **Admin → Usage & stats**.
+
 ## Local dev
 
 ```bash
@@ -120,6 +124,13 @@ npm run dev:proxy
 > the working directory to the package folder, so a relative `CPX_DB_PATH` would
 > resolve per-package and silently split the DB. The `dev:*` scripts and the
 > compose file both use an absolute path to avoid this.
+
+> The `dev:*` scripts also auto-load `.env` (`set -a; . ./.env; set +a`) — neither
+> `tsx` nor `bun` reads the repo-root `.env` on its own, and a missing
+> `CPX_MASTER_KEY` would leave the control-plane unable to decrypt stored tokens
+> (every account then shows `error`). In local dev the proxy binds
+> `CPX_GATEWAY_PORT` (4000) directly; the internal `4141` only matters inside
+> Docker, where compose maps `4000→4141`.
 
 The proxy runs under **Bun** (it uses the built-in `bun:sqlite` to read the shared
 DB and `node:crypto` to decrypt tokens). No container is launched on bind — the
@@ -144,38 +155,45 @@ Notes:
   tenant resolution — no waiting on the health monitor.
 - Set `CPX_VERBOSE=1` on the proxy for verbose upstream logging (server-side only).
 
-## Token metering
+## Usage metering & dashboards
 
-The control-plane's `usage_logs` table records **one row per call** (who / which
-account / path / model / HTTP status / timestamp) — it does **not** store token
-counts. Inspect it directly:
+Every model call is metered. A response-boundary middleware in the proxy parses
+the upstream `usage` block — for non-streaming JSON and for streaming SSE (it
+**tees** the stream, so the bytes sent to the client are untouched) — and writes
+**one row per call** to `usage_logs`: user / account / key / endpoint / model /
+HTTP status / stream flag, plus `prompt_tokens`, `completion_tokens`,
+`cached_tokens`, `reasoning_tokens`, `total_tokens`, `duration_ms` and `ttfb_ms`.
+Prompt and response **content is never stored** — only counts.
+
+The control-plane renders this back as dashboards:
+
+| Page | Who | Shows |
+| --- | --- | --- |
+| `/dashboard/usage` | each user | summary cards, daily request/token charts, per-model breakdown, recent requests |
+| `/admin/usage` | admin | global totals, top users, per-model split, recent requests, CSV export |
+| `/admin/users/:id/usage` | admin | a single user's usage |
+
+All views take a `?days=7\|30\|90` window. The token/cost numbers originate from
+the upstream model response; where they come from per surface:
+
+| API surface | Token fields in the response |
+| --- | --- |
+| OpenAI Chat Completions | `usage.prompt_tokens`, `usage.completion_tokens`, `usage.total_tokens` |
+| OpenAI Responses | `usage.input_tokens`, `usage.output_tokens`; plus `copilot_usage.total_nano_aiu` (billing units) |
+| Anthropic Messages | `usage.input_tokens`, `usage.output_tokens`, `usage.cache_read_input_tokens` |
+
+Notes:
+- Prompt caching is real on this path: with Anthropic `cache_control`, warm calls
+  show `cache_read_input_tokens` > 0 and billed input collapses to the new tokens
+  — surfaced as the **cache-hit %** on the dashboards.
+- Inspect the raw table directly any time:
 
 ```bash
 docker compose exec -T control-plane node -e "
 const db=require('better-sqlite3')('/app/data/cpx.db');
-console.table(db.prepare('SELECT id,user_id,account_id,path,model,status_code,created_at FROM usage_logs ORDER BY id DESC LIMIT 20').all());
+console.table(db.prepare('SELECT id,user_id,model,status_code,prompt_tokens,completion_tokens,total_tokens,duration_ms,created_at FROM usage_logs ORDER BY id DESC LIMIT 20').all());
 "
 ```
-
-Token consumption itself is reported by the **upstream model in the response body**,
-not by the proxy. Where to read it depends on the API surface you call:
-
-| API surface | Endpoint | Token fields in the JSON response |
-| --- | --- | --- |
-| OpenAI Chat Completions | `/v1/chat/completions` | `usage.prompt_tokens`, `usage.completion_tokens`, `usage.total_tokens` |
-| OpenAI Responses | `/v1/responses` | `usage.input_tokens`, `usage.output_tokens`; plus `copilot_usage.token_details[]` (per-type `token_count`: `input` / `output` / `cache_read`) and `copilot_usage.total_nano_aiu` (billing units) |
-| Anthropic Messages | `/v1/messages` | `usage.input_tokens`, `usage.output_tokens`, `usage.cache_read_input_tokens` (cache hits) |
-
-Notes:
-- For **streaming** requests, OpenAI only includes the `usage` block in the final
-  chunk if you send `"stream_options": {"include_usage": true}`. Anthropic emits
-  usage in the `message_delta` / final event by default.
-- The proxy does **not** currently parse these fields into the DB (it reverse-
-  proxies the byte stream as-is). To meter by token, either have clients read the
-  `usage` block from each response, or extend the gateway to sniff the trailing
-  `usage` and add `prompt/completion/total` columns to `usage_logs`.
-- Prompt caching is real on this path: with Anthropic `cache_control`, warm calls
-  show `cache_read_input_tokens` > 0 and billed input collapses to the new tokens.
 
 ## Notes / limits (demo)
 

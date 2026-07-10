@@ -36,6 +36,11 @@ export interface TenantOverride {
   githubToken?: string
   copilotToken?: string
   accountType?: string
+  // Identity of the resolved tenant, used for usage metering. Not surfaced on
+  // `state` (not in TENANT_KEYS); read directly via tenantContext.getStore().
+  userId?: number
+  accountId?: number
+  apiKeyId?: number
 }
 
 export const tenantContext = new AsyncLocalStorage<TenantOverride>()

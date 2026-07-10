@@ -5,6 +5,8 @@ import {
   createApiKey,
   createUser,
   deleteAccount,
+  deleteRevokedApiKey,
+  deleteRevokedApiKeys,
   deleteUser,
   encryptSecret,
   generateApiKey,
@@ -14,10 +16,15 @@ import {
   listApiKeys,
   listAccounts,
   listUsers,
+  recentUsage,
   revokeApiKey,
   setAccountStatus,
   setUserStatus,
   upsertAccount,
+  usageByModel,
+  usageByUser,
+  usageSummary,
+  usageTimeseries,
   type User,
 } from '@cpx/shared';
 import {
@@ -28,7 +35,17 @@ import {
 } from './githubDeviceFlow.js';
 import { checkCopilotAccess } from './copilotCheck.js';
 import { startHealthMonitor } from './health.js';
-import { adminPage, adminUserPage, connectPage, dashboardPage, loginPage } from './views.js';
+import {
+  adminPage,
+  adminUsagePage,
+  adminUserPage,
+  adminUserUsagePage,
+  connectPage,
+  dashboardPage,
+  examplesPage,
+  loginPage,
+  usagePage,
+} from './views.js';
 
 declare module 'express-session' {
   interface SessionData {
@@ -133,6 +150,33 @@ function renderDashboard(req: Request, res: Response, user: User): void {
   res.send(dashboardPage(user, account, keys, gatewayBase(req), { newKey }));
 }
 
+// Parse a ?days= window, clamped to the supported options.
+function parseDays(req: Request): number {
+  const raw = Number((req.query as { days?: string }).days);
+  return [7, 30, 90].includes(raw) ? raw : 30;
+}
+
+// --- usage dashboards ---
+app.get('/dashboard/usage', requireAuth, (req, res) => {
+  const user = (req as Request & { user: User }).user;
+  const days = parseDays(req);
+  res.send(
+    usagePage(
+      user,
+      usageSummary(user.id, days),
+      usageTimeseries(user.id, days),
+      usageByModel(user.id, days),
+      recentUsage(user.id, 50),
+      days
+    )
+  );
+});
+
+app.get('/examples', requireAuth, (req, res) => {
+  const user = (req as Request & { user: User }).user;
+  res.send(examplesPage(user, gatewayBase(req)));
+});
+
 // --- api keys ---
 app.post('/keys', requireAuth, (req, res) => {
   const user = (req as Request & { user: User }).user;
@@ -145,6 +189,18 @@ app.post('/keys', requireAuth, (req, res) => {
 app.post('/keys/:id/revoke', requireAuth, (req, res) => {
   const user = (req as Request & { user: User }).user;
   revokeApiKey(Number(req.params.id), user.id);
+  res.redirect('/dashboard');
+});
+
+app.post('/keys/:id/delete', requireAuth, (req, res) => {
+  const user = (req as Request & { user: User }).user;
+  deleteRevokedApiKey(Number(req.params.id), user.id);
+  res.redirect('/dashboard');
+});
+
+app.post('/keys/delete-revoked', requireAuth, (req, res) => {
+  const user = (req as Request & { user: User }).user;
+  deleteRevokedApiKeys(user.id);
   res.redirect('/dashboard');
 });
 
@@ -235,6 +291,43 @@ app.get('/admin', requireAuth, requireAdmin, (req, res) => {
   res.send(adminPage(user, listUsers(), listAccounts()));
 });
 
+app.get('/admin/usage', requireAuth, requireAdmin, (req, res) => {
+  const user = (req as Request & { user: User }).user;
+  const days = parseDays(req);
+  res.send(
+    adminUsagePage(
+      user,
+      usageSummary(null, days),
+      usageTimeseries(null, days),
+      usageByModel(null, days),
+      usageByUser(days),
+      recentUsage(null, 50),
+      days
+    )
+  );
+});
+
+app.get('/admin/usage.csv', requireAuth, requireAdmin, (req, res) => {
+  const days = parseDays(req);
+  const rows = usageByUser(days);
+  const header = 'user_id,username,requests,total_tokens,cost_nano_aiu';
+  const csv = [
+    header,
+    ...rows.map((r) =>
+      [
+        r.user_id,
+        '"' + String(r.username).replace(/"/g, '""') + '"',
+        r.requests,
+        r.total_tokens,
+        r.cost_nano_aiu,
+      ].join(',')
+    ),
+  ].join('\n');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="usage-${days}d.csv"`);
+  res.send(csv);
+});
+
 app.post('/admin/users', requireAuth, requireAdmin, (req, res) => {
   const { username, password, is_admin } = req.body as {
     username?: string;
@@ -305,6 +398,37 @@ app.post('/admin/users/:id/keys/:keyId/revoke', requireAuth, requireAdmin, (req,
   const id = Number(req.params.id);
   if (getUserById(id)) revokeApiKey(Number(req.params.keyId), id);
   res.redirect(`/admin/users/${id}`);
+});
+
+app.post('/admin/users/:id/keys/:keyId/delete', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  if (getUserById(id)) deleteRevokedApiKey(Number(req.params.keyId), id);
+  res.redirect(`/admin/users/${id}`);
+});
+
+app.post('/admin/users/:id/keys/delete-revoked', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  if (getUserById(id)) deleteRevokedApiKeys(id);
+  res.redirect(`/admin/users/${id}`);
+});
+
+app.get('/admin/users/:id/usage', requireAuth, requireAdmin, (req, res) => {
+  const admin = (req as Request & { user: User }).user;
+  const id = Number(req.params.id);
+  const target = getUserById(id);
+  if (!target) return res.redirect('/admin');
+  const days = parseDays(req);
+  res.send(
+    adminUserUsagePage(
+      admin,
+      target,
+      usageSummary(id, days),
+      usageTimeseries(id, days),
+      usageByModel(id, days),
+      recentUsage(id, 50),
+      days
+    )
+  );
 });
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }));

@@ -53,19 +53,67 @@ function migrate(d: Database.Database): void {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
       account_id INTEGER NOT NULL,
+      api_key_id INTEGER,
       path TEXT NOT NULL,
+      endpoint_kind TEXT,
       model TEXT,
       status_code INTEGER,
+      stream INTEGER NOT NULL DEFAULT 0,
+      prompt_tokens INTEGER,
+      completion_tokens INTEGER,
+      cached_tokens INTEGER,
+      reasoning_tokens INTEGER,
+      total_tokens INTEGER,
+      cost_nano_aiu INTEGER,
+      duration_ms INTEGER,
+      ttfb_ms INTEGER,
+      error_type TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_logs(user_id);
+    CREATE INDEX IF NOT EXISTS idx_usage_user_ts ON usage_logs(user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_logs(created_at);
+    CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_logs(model);
   `);
 
   // Backfill: add users.status to databases created before this column existed.
-  const cols = d.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
-  if (!cols.some((c) => c.name === 'status')) {
+  const userCols = d.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
+  if (!userCols.some((c) => c.name === 'status')) {
     d.exec("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
   }
+
+  // Backfill: add usage_logs metering columns to databases created before they
+  // existed. The proxy writes these; keep the canonical schema here as the
+  // single source of truth.
+  const usageCols = new Set(
+    (d.prepare("PRAGMA table_info(usage_logs)").all() as Array<{ name: string }>).map(
+      (c) => c.name
+    )
+  );
+  const usageAdditions: Array<[string, string]> = [
+    ['api_key_id', 'INTEGER'],
+    ['endpoint_kind', 'TEXT'],
+    ['stream', 'INTEGER NOT NULL DEFAULT 0'],
+    ['prompt_tokens', 'INTEGER'],
+    ['completion_tokens', 'INTEGER'],
+    ['cached_tokens', 'INTEGER'],
+    ['reasoning_tokens', 'INTEGER'],
+    ['total_tokens', 'INTEGER'],
+    ['cost_nano_aiu', 'INTEGER'],
+    ['duration_ms', 'INTEGER'],
+    ['ttfb_ms', 'INTEGER'],
+    ['error_type', 'TEXT'],
+  ];
+  for (const [name, type] of usageAdditions) {
+    if (!usageCols.has(name)) {
+      d.exec(`ALTER TABLE usage_logs ADD COLUMN ${name} ${type}`);
+    }
+  }
+  d.exec(`
+    CREATE INDEX IF NOT EXISTS idx_usage_user_ts ON usage_logs(user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_logs(created_at);
+    CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_logs(model);
+  `);
 }
 
 // --- users ---
@@ -114,6 +162,21 @@ export function revokeApiKey(id: number, userId: number): void {
   getDb()
     .prepare("UPDATE api_keys SET status = 'revoked' WHERE id = ? AND user_id = ?")
     .run(id, userId);
+}
+
+/** Permanently delete a single key, but only if it is already revoked. */
+export function deleteRevokedApiKey(id: number, userId: number): void {
+  getDb()
+    .prepare("DELETE FROM api_keys WHERE id = ? AND user_id = ? AND status = 'revoked'")
+    .run(id, userId);
+}
+
+/** Permanently delete all of a user's revoked keys. Returns the number removed. */
+export function deleteRevokedApiKeys(userId: number): number {
+  const info = getDb()
+    .prepare("DELETE FROM api_keys WHERE user_id = ? AND status = 'revoked'")
+    .run(userId);
+  return info.changes;
 }
 
 export function findActiveKeyByHash(keyHash: string): ApiKey | undefined {
@@ -169,16 +232,194 @@ export function deleteAccount(userId: number): void {
 }
 
 // --- usage ---
-export function logUsage(
-  userId: number,
-  accountId: number,
-  path: string,
-  model: string | null,
-  statusCode: number | null
-): void {
+export interface UsageInsert {
+  user_id: number;
+  account_id: number;
+  api_key_id?: number | null;
+  path: string;
+  endpoint_kind?: string | null;
+  model?: string | null;
+  status_code?: number | null;
+  stream?: boolean;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  cached_tokens?: number | null;
+  reasoning_tokens?: number | null;
+  total_tokens?: number | null;
+  cost_nano_aiu?: number | null;
+  duration_ms?: number | null;
+  ttfb_ms?: number | null;
+  error_type?: string | null;
+}
+
+export function logUsage(entry: UsageInsert): void {
   getDb()
     .prepare(
-      'INSERT INTO usage_logs (user_id, account_id, path, model, status_code) VALUES (?, ?, ?, ?, ?)'
+      `INSERT INTO usage_logs (
+        user_id, account_id, api_key_id, path, endpoint_kind, model, status_code,
+        stream, prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens,
+        total_tokens, cost_nano_aiu, duration_ms, ttfb_ms, error_type
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(userId, accountId, path, model, statusCode);
+    .run(
+      entry.user_id,
+      entry.account_id,
+      entry.api_key_id ?? null,
+      entry.path,
+      entry.endpoint_kind ?? null,
+      entry.model ?? null,
+      entry.status_code ?? null,
+      entry.stream ? 1 : 0,
+      entry.prompt_tokens ?? null,
+      entry.completion_tokens ?? null,
+      entry.cached_tokens ?? null,
+      entry.reasoning_tokens ?? null,
+      entry.total_tokens ?? null,
+      entry.cost_nano_aiu ?? null,
+      entry.duration_ms ?? null,
+      entry.ttfb_ms ?? null,
+      entry.error_type ?? null
+    );
+}
+
+// --- usage aggregation (Phase 2 dashboards) ---
+export interface UsageSummary {
+  requests: number;
+  errors: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  total_tokens: number;
+  cost_nano_aiu: number;
+}
+
+export interface UsageDay {
+  day: string;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+export interface UsageByModel {
+  model: string;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  total_tokens: number;
+}
+
+export interface UsageByUser {
+  user_id: number;
+  username: string;
+  requests: number;
+  total_tokens: number;
+  cost_nano_aiu: number;
+}
+
+export interface RecentUsage {
+  id: number;
+  created_at: string;
+  endpoint_kind: string | null;
+  model: string | null;
+  status_code: number | null;
+  stream: number;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  duration_ms: number | null;
+}
+
+// Window helper: only whole positive day counts are interpolated into SQL, so
+// there is no injection surface (value is coerced to an integer). `col` lets
+// callers qualify the column (e.g. `l.created_at`) in joined queries where
+// `created_at` would otherwise be ambiguous.
+function sinceClause(sinceDays: number, col = 'created_at'): string {
+  const n = Math.max(1, Math.floor(sinceDays));
+  return `${col} >= datetime('now', '-${n} days')`;
+}
+
+export function usageSummary(userId: number | null, sinceDays = 30): UsageSummary {
+  const where = userId == null ? sinceClause(sinceDays) : `user_id = ? AND ${sinceClause(sinceDays)}`;
+  const params = userId == null ? [] : [userId];
+  return getDb()
+    .prepare(
+      `SELECT
+         COUNT(*)                                            AS requests,
+         COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS errors,
+         COALESCE(SUM(prompt_tokens), 0)                     AS prompt_tokens,
+         COALESCE(SUM(completion_tokens), 0)                 AS completion_tokens,
+         COALESCE(SUM(cached_tokens), 0)                     AS cached_tokens,
+         COALESCE(SUM(total_tokens), 0)                      AS total_tokens,
+         COALESCE(SUM(cost_nano_aiu), 0)                     AS cost_nano_aiu
+       FROM usage_logs WHERE ${where}`
+    )
+    .get(...params) as UsageSummary;
+}
+
+export function usageTimeseries(userId: number | null, sinceDays = 30): UsageDay[] {
+  const where = userId == null ? sinceClause(sinceDays) : `user_id = ? AND ${sinceClause(sinceDays)}`;
+  const params = userId == null ? [] : [userId];
+  return getDb()
+    .prepare(
+      `SELECT
+         substr(created_at, 1, 10)            AS day,
+         COUNT(*)                             AS requests,
+         COALESCE(SUM(prompt_tokens), 0)      AS prompt_tokens,
+         COALESCE(SUM(completion_tokens), 0)  AS completion_tokens,
+         COALESCE(SUM(total_tokens), 0)       AS total_tokens
+       FROM usage_logs WHERE ${where}
+       GROUP BY day ORDER BY day`
+    )
+    .all(...params) as UsageDay[];
+}
+
+export function usageByModel(userId: number | null, sinceDays = 30): UsageByModel[] {
+  const where = userId == null ? sinceClause(sinceDays) : `user_id = ? AND ${sinceClause(sinceDays)}`;
+  const params = userId == null ? [] : [userId];
+  return getDb()
+    .prepare(
+      `SELECT
+         COALESCE(model, '(unknown)')         AS model,
+         COUNT(*)                             AS requests,
+         COALESCE(SUM(prompt_tokens), 0)      AS prompt_tokens,
+         COALESCE(SUM(completion_tokens), 0)  AS completion_tokens,
+         COALESCE(SUM(cached_tokens), 0)      AS cached_tokens,
+         COALESCE(SUM(total_tokens), 0)       AS total_tokens
+       FROM usage_logs WHERE ${where}
+       GROUP BY model ORDER BY total_tokens DESC, requests DESC`
+    )
+    .all(...params) as UsageByModel[];
+}
+
+export function usageByUser(sinceDays = 30): UsageByUser[] {
+  return getDb()
+    .prepare(
+      `SELECT
+         l.user_id                            AS user_id,
+         COALESCE(u.username, '(deleted)')    AS username,
+         COUNT(*)                             AS requests,
+         COALESCE(SUM(l.total_tokens), 0)     AS total_tokens,
+         COALESCE(SUM(l.cost_nano_aiu), 0)    AS cost_nano_aiu
+       FROM usage_logs l
+       LEFT JOIN users u ON u.id = l.user_id
+       WHERE ${sinceClause(sinceDays, 'l.created_at')}
+       GROUP BY l.user_id ORDER BY total_tokens DESC, requests DESC`
+    )
+    .all() as UsageByUser[];
+}
+
+export function recentUsage(userId: number | null, limit = 50): RecentUsage[] {
+  const n = Math.max(1, Math.min(500, Math.floor(limit)));
+  const where = userId == null ? '1=1' : 'user_id = ?';
+  const params = userId == null ? [] : [userId];
+  return getDb()
+    .prepare(
+      `SELECT id, created_at, endpoint_kind, model, status_code, stream,
+              prompt_tokens, completion_tokens, total_tokens, duration_ms
+       FROM usage_logs WHERE ${where}
+       ORDER BY id DESC LIMIT ${n}`
+    )
+    .all(...params) as RecentUsage[];
 }

@@ -19,10 +19,17 @@ function getDb(): Database {
 }
 
 export type TenantResolution =
-  | { ok: true; githubToken: string; userId: number; accountId: number }
+  | {
+      ok: true
+      githubToken: string
+      userId: number
+      accountId: number
+      apiKeyId: number
+    }
   | { ok: false; status: 401 | 403; message: string; type: string }
 
 interface KeyRow {
+  api_key_id: number
   user_id: number
   user_status: string
   account_id: number | null
@@ -37,7 +44,8 @@ interface KeyRow {
 export function resolveTenant(apiKey: string): TenantResolution {
   const row = getDb()
     .query<KeyRow, [string]>(
-      `SELECT k.user_id        AS user_id,
+      `SELECT k.id             AS api_key_id,
+              k.user_id        AS user_id,
               u.status         AS user_status,
               a.id             AS account_id,
               a.gh_token_enc   AS gh_token_enc,
@@ -92,5 +100,6 @@ export function resolveTenant(apiKey: string): TenantResolution {
     githubToken,
     userId: row.user_id,
     accountId: row.account_id,
+    apiKeyId: row.api_key_id,
   }
 }

@@ -8,8 +8,8 @@
     "control-plane"
   ],
   "scripts": {
-    "dev:cp": "CPX_DB_PATH=\"$PWD/data/cpx.db\" npm -w control-plane run dev",
-    "dev:proxy": "CPX_DB_PATH=\"$PWD/data/cpx.db\" bash -c 'cd proxy && bun run src/cpx/main.ts'",
+    "dev:cp": "set -a; [ -f .env ] && . ./.env; set +a; CPX_DB_PATH=\"$PWD/data/cpx.db\" npm -w control-plane run dev",
+    "dev:proxy": "set -a; [ -f .env ] && . ./.env; set +a; CPX_DB_PATH=\"$PWD/data/cpx.db\" CPX_PROXY_PORT=\"${CPX_GATEWAY_PORT:-4000}\" bash -c 'cd proxy && bun run src/cpx/main.ts'",
     "build": "npm -w control-plane run build"
   },
   "engines": {

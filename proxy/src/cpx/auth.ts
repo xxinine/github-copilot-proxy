@@ -65,7 +65,13 @@ export const cpxAuth: MiddlewareHandler = async (c, next) => {
   }
 
   return tenantContext.run(
-    { githubToken: tenant.githubToken, copilotToken },
+    {
+      githubToken: tenant.githubToken,
+      copilotToken,
+      userId: tenant.userId,
+      accountId: tenant.accountId,
+      apiKeyId: tenant.apiKeyId,
+    },
     () => next(),
   )
 }

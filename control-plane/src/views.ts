@@ -1,4 +1,13 @@
-import type { Account, ApiKey, User } from '@cpx/shared';
+import type {
+  Account,
+  ApiKey,
+  RecentUsage,
+  UsageByModel,
+  UsageByUser,
+  UsageDay,
+  UsageSummary,
+  User,
+} from '@cpx/shared';
 
 function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) =>
@@ -25,6 +34,8 @@ function layout(title: string, body: string, user?: User): string {
   input, button { font: inherit; padding: .45rem .6rem; border-radius: 6px; border: 1px solid #8886; }
   button { cursor: pointer; background: #2563eb; color: #fff; border-color: #2563eb; }
   button.secondary { background: transparent; color: inherit; }
+  button.iconbtn { padding: .35rem .45rem; line-height: 0; vertical-align: middle; }
+  button.iconbtn svg { display: block; }
   .card { border: 1px solid #8884; border-radius: 10px; padding: 1rem; margin: 1rem 0; }
   .pill { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .8rem; }
   .ok { background: #16a34a22; color: #16a34a; } .warn { background: #d9770622; color: #d97706; }
@@ -39,8 +50,25 @@ function layout(title: string, body: string, user?: User): string {
   <div>${user ? `${esc(user.username)}${user.is_admin ? ' (admin)' : ''} · <a href="/logout">Logout</a>` : ''}</div>
 </header>
 ${body}
+<script>
+  function cpxCopy(id, btn){
+    var el=document.getElementById(id); if(!el) return;
+    var txt=el.textContent||'';
+    function done(){ var old=btn.getAttribute('data-label')||btn.innerHTML; btn.setAttribute('data-label', old); btn.innerHTML='✓'; setTimeout(function(){ btn.innerHTML=btn.getAttribute('data-label'); }, 1200); }
+    if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(txt).then(done).catch(function(){}); }
+    else { try{ var t=document.createElement('textarea'); t.value=txt; document.body.appendChild(t); t.select(); document.execCommand('copy'); document.body.removeChild(t); done(); }catch(e){} }
+  }
+</script>
 </body>
 </html>`;
+}
+
+const COPY_SVG =
+  '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+
+/** A small icon-only button that copies the text content of `targetId`. */
+function copyIconBtn(targetId: string): string {
+  return `<button type="button" class="secondary iconbtn" title="Copy" aria-label="Copy" onclick="cpxCopy('${targetId}', this)">${COPY_SVG}</button>`;
 }
 
 export function loginPage(error?: string): string {
@@ -97,21 +125,34 @@ export function dashboardPage(
         <td>${esc(k.name || '-')}</td>
         <td>${k.status === 'active' ? '<span class="pill ok">active</span>' : '<span class="pill muted">revoked</span>'}</td>
         <td>${esc(k.created_at)}</td>
-        <td>${k.status === 'active' ? `<form class="inline" method="post" action="/keys/${k.id}/revoke"><button class="secondary">Revoke</button></form>` : ''}</td>
+        <td>${
+          k.status === 'active'
+            ? `<form class="inline" method="post" action="/keys/${k.id}/revoke"><button class="secondary">Revoke</button></form>`
+            : `<form class="inline" method="post" action="/keys/${k.id}/delete"><button class="secondary" style="border-color:#dc2626;color:#dc2626">Delete</button></form>`
+        }</td>
       </tr>`
     )
     .join('');
 
+  const hasRevoked = keys.some((k) => k.status === 'revoked');
+  const deleteRevokedBtn = hasRevoked
+    ? `<form class="inline" method="post" action="/keys/delete-revoked" onsubmit="return confirm('Permanently delete all revoked keys?');"><button class="secondary" style="border-color:#dc2626;color:#dc2626">Delete all revoked</button></form>`
+    : '';
+
   const newKeyBanner = flash?.newKey
     ? `<div class="card" style="border-color:#16a34a">
         <strong>New API key (copy now — shown once):</strong>
-        <pre>${esc(flash.newKey)}</pre>
+        <div style="display:flex;gap:.5rem;align-items:center">
+          <pre id="newkey" style="flex:1;margin:0">${esc(flash.newKey)}</pre>
+          ${copyIconBtn('newkey')}
+        </div>
       </div>`
     : '';
 
   return layout(
     'Dashboard',
     `${user.is_admin ? '<p><a href="/admin">← Admin · manage users</a></p>' : ''}
+    <p><a href="/dashboard/usage">Usage &amp; stats →</a> · <a href="/examples">Client examples →</a></p>
     ${bindingCard}
     ${newKeyBanner}
     <div class="card">
@@ -124,6 +165,7 @@ export function dashboardPage(
         <input name="name" placeholder="Key name (optional)">
         <button type="submit">Create API key</button>
       </form>
+      ${deleteRevokedBtn ? `<p>${deleteRevokedBtn}</p>` : ''}
     </div>
     <div class="card">
       <h2 style="margin-top:0">How to use</h2>
@@ -205,7 +247,7 @@ export function adminPage(user: User, users: User[], accounts: Account[]): strin
     .join('');
   return layout(
     'Admin',
-    `<p><a href="/dashboard">← My dashboard</a></p>
+    `<p><a href="/dashboard">← My dashboard</a> · <a href="/admin/usage">Usage &amp; stats →</a></p>
     <div class="card">
       <h2 style="margin-top:0">Users</h2>
       <table>
@@ -241,20 +283,27 @@ export function adminUserPage(
         <td>${
           k.status === 'active'
             ? `<form class="inline" method="post" action="/admin/users/${target.id}/keys/${k.id}/revoke"><button class="secondary">Revoke</button></form>`
-            : ''
+            : `<form class="inline" method="post" action="/admin/users/${target.id}/keys/${k.id}/delete"><button class="secondary" style="border-color:#dc2626;color:#dc2626">Delete</button></form>`
         }</td>
       </tr>`
     )
     .join('');
+  const hasRevoked = keys.some((k) => k.status === 'revoked');
+  const deleteRevokedBtn = hasRevoked
+    ? `<form class="inline" method="post" action="/admin/users/${target.id}/keys/delete-revoked" onsubmit="return confirm('Permanently delete all revoked keys for this user?');"><button class="secondary" style="border-color:#dc2626;color:#dc2626">Delete all revoked</button></form>`
+    : '';
   const newKeyBanner = flash?.newKey
     ? `<div class="card" style="border-color:#16a34a">
         <strong>New API key for ${esc(target.username)} (copy now — shown once, then hand it to the user securely):</strong>
-        <pre>${esc(flash.newKey)}</pre>
+        <div style="display:flex;gap:.5rem;align-items:center">
+          <pre id="newkey" style="flex:1;margin:0">${esc(flash.newKey)}</pre>
+          ${copyIconBtn('newkey')}
+        </div>
       </div>`
     : '';
   return layout(
     'Manage user',
-    `<p><a href="/admin">← Back to users</a></p>
+    `<p><a href="/admin">← Back to users</a> · <a href="/admin/users/${target.id}/usage">Usage &amp; stats →</a></p>
     <div class="card">
       <h2 style="margin-top:0">${esc(target.username)}${
         target.is_admin ? ' <span class="pill ok">admin</span>' : ''
@@ -279,7 +328,387 @@ export function adminUserPage(
         <input name="name" placeholder="Key name (optional)">
         <button type="submit">Create API key</button>
       </form>
+      ${deleteRevokedBtn ? `<p>${deleteRevokedBtn}</p>` : ''}
     </div>`,
     admin
+  );
+}
+
+// ---- usage dashboards (Phase 2) ----
+
+function fmtNum(n: number): string {
+  return (n || 0).toLocaleString('en-US');
+}
+
+function fmtPct(part: number, whole: number): string {
+  if (!whole) return '0%';
+  return `${Math.round((part / whole) * 100)}%`;
+}
+
+function windowSelector(base: string, since: number): string {
+  const opts = [7, 30, 90];
+  return `<div class="muted" style="font-size:.85rem">Window: ${opts
+    .map((d) =>
+      d === since
+        ? `<strong>${d}d</strong>`
+        : `<a href="${base}?days=${d}">${d}d</a>`
+    )
+    .join(' · ')}</div>`;
+}
+
+function usageCards(s: UsageSummary): string {
+  const card = (label: string, value: string, sub = ''): string =>
+    `<div class="card" style="flex:1;min-width:140px;margin:0">
+      <div class="muted" style="font-size:.8rem">${label}</div>
+      <div style="font-size:1.5rem;font-weight:600">${value}</div>
+      ${sub ? `<div class="muted" style="font-size:.8rem">${sub}</div>` : ''}
+    </div>`;
+  const cacheHit = fmtPct(s.cached_tokens, s.prompt_tokens);
+  return `<div style="display:flex;gap:.75rem;flex-wrap:wrap">
+    ${card('Requests', fmtNum(s.requests), s.errors ? `${fmtNum(s.errors)} errors` : 'no errors')}
+    ${card('Input tokens', fmtNum(s.prompt_tokens), `cache hit ${cacheHit}`)}
+    ${card('Output tokens', fmtNum(s.completion_tokens))}
+    ${card('Total tokens', fmtNum(s.total_tokens))}
+  </div>`;
+}
+
+// Zero-dependency inline SVG bar chart of a daily series.
+function svgBars(days: UsageDay[], pick: (d: UsageDay) => number, title: string): string {
+  if (days.length === 0) {
+    return `<p class="muted">No data in this window yet.</p>`;
+  }
+  const W = 780;
+  const H = 120;
+  const pad = 4;
+  const max = Math.max(1, ...days.map(pick));
+  const bw = (W - pad * 2) / days.length;
+  const bars = days
+    .map((d, i) => {
+      const v = pick(d);
+      const h = Math.round((v / max) * (H - 24));
+      const x = pad + i * bw;
+      const y = H - h - 16;
+      return `<rect x="${x.toFixed(1)}" y="${y}" width="${Math.max(1, bw - 1).toFixed(1)}" height="${h}" fill="#2563eb" rx="1"><title>${esc(d.day)}: ${fmtNum(v)}</title></rect>`;
+    })
+    .join('');
+  const first = esc(days[0].day);
+  const last = esc(days[days.length - 1].day);
+  return `<div class="muted" style="font-size:.8rem">${esc(title)} · peak ${fmtNum(max)}</div>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="${esc(title)}">
+      ${bars}
+    </svg>
+    <div class="muted" style="display:flex;justify-content:space-between;font-size:.75rem">
+      <span>${first}</span><span>${last}</span>
+    </div>`;
+}
+
+function modelTable(rows: UsageByModel[], totalTokens: number): string {
+  if (rows.length === 0) return '<p class="muted">No model usage yet.</p>';
+  const body = rows
+    .map(
+      (m) => `<tr>
+        <td><code>${esc(m.model)}</code></td>
+        <td>${fmtNum(m.requests)}</td>
+        <td>${fmtNum(m.prompt_tokens)}</td>
+        <td>${fmtNum(m.completion_tokens)}</td>
+        <td>${fmtNum(m.cached_tokens)}</td>
+        <td>${fmtNum(m.total_tokens)} <span class="muted">(${fmtPct(m.total_tokens, totalTokens)})</span></td>
+      </tr>`
+    )
+    .join('');
+  return `<table>
+    <thead><tr><th>Model</th><th>Reqs</th><th>Input</th><th>Output</th><th>Cached</th><th>Total</th></tr></thead>
+    <tbody>${body}</tbody>
+  </table>`;
+}
+
+function recentTable(rows: RecentUsage[]): string {
+  if (rows.length === 0) return '<p class="muted">No requests yet.</p>';
+  const body = rows
+    .map((r) => {
+      const okPill =
+        r.status_code && r.status_code >= 400
+          ? `<span class="pill err">${r.status_code}</span>`
+          : `<span class="pill ok">${r.status_code ?? '-'}</span>`;
+      return `<tr>
+        <td class="muted">${esc(r.created_at)}</td>
+        <td>${esc(r.endpoint_kind || '-')}${r.stream ? ' <span class="muted">(stream)</span>' : ''}</td>
+        <td><code>${esc(r.model || '-')}</code></td>
+        <td>${okPill}</td>
+        <td>${r.prompt_tokens == null ? '-' : fmtNum(r.prompt_tokens)}</td>
+        <td>${r.completion_tokens == null ? '-' : fmtNum(r.completion_tokens)}</td>
+        <td>${r.duration_ms == null ? '-' : `${fmtNum(r.duration_ms)}ms`}</td>
+      </tr>`;
+    })
+    .join('');
+  return `<table>
+    <thead><tr><th>Time</th><th>Endpoint</th><th>Model</th><th>Status</th><th>Input</th><th>Output</th><th>Latency</th></tr></thead>
+    <tbody>${body}</tbody>
+  </table>`;
+}
+
+export function usagePage(
+  user: User,
+  summary: UsageSummary,
+  days: UsageDay[],
+  byModel: UsageByModel[],
+  recent: RecentUsage[],
+  since: number
+): string {
+  return layout(
+    'My usage',
+    `<p><a href="/dashboard">← My dashboard</a></p>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">My usage</h2>
+        ${windowSelector('/dashboard/usage', since)}
+      </div>
+      ${usageCards(summary)}
+      <div style="margin-top:1rem">${svgBars(days, (d) => d.requests, 'Requests per day')}</div>
+      <div style="margin-top:1rem">${svgBars(days, (d) => d.total_tokens, 'Total tokens per day')}</div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">By model</h2>
+      ${modelTable(byModel, summary.total_tokens)}
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Recent requests</h2>
+      ${recentTable(recent)}
+    </div>`,
+    user
+  );
+}
+
+function byUserTable(rows: UsageByUser[]): string {
+  if (rows.length === 0) return '<p class="muted">No usage yet.</p>';
+  const body = rows
+    .map(
+      (u) => `<tr>
+        <td><a href="/admin/users/${u.user_id}">${esc(u.username)}</a></td>
+        <td>${fmtNum(u.requests)}</td>
+        <td>${fmtNum(u.total_tokens)}</td>
+      </tr>`
+    )
+    .join('');
+  return `<table>
+    <thead><tr><th>User</th><th>Requests</th><th>Total tokens</th></tr></thead>
+    <tbody>${body}</tbody>
+  </table>`;
+}
+
+export function adminUsagePage(
+  admin: User,
+  summary: UsageSummary,
+  days: UsageDay[],
+  byModel: UsageByModel[],
+  byUser: UsageByUser[],
+  recent: RecentUsage[],
+  since: number
+): string {
+  return layout(
+    'Usage · admin',
+    `<p><a href="/admin">← Users</a> · <a href="/dashboard">My dashboard</a></p>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">Usage (all users)</h2>
+        <div>${windowSelector('/admin/usage', since)} <a href="/admin/usage.csv?days=${since}">Export CSV</a></div>
+      </div>
+      ${usageCards(summary)}
+      <div style="margin-top:1rem">${svgBars(days, (d) => d.requests, 'Requests per day')}</div>
+      <div style="margin-top:1rem">${svgBars(days, (d) => d.total_tokens, 'Total tokens per day')}</div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Top users</h2>
+      ${byUserTable(byUser)}
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">By model</h2>
+      ${modelTable(byModel, summary.total_tokens)}
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Recent requests (all users)</h2>
+      ${recentTable(recent)}
+    </div>`,
+    admin
+  );
+}
+
+export function adminUserUsagePage(
+  admin: User,
+  target: User,
+  summary: UsageSummary,
+  days: UsageDay[],
+  byModel: UsageByModel[],
+  recent: RecentUsage[],
+  since: number
+): string {
+  return layout(
+    `Usage · ${target.username}`,
+    `<p><a href="/admin/users/${target.id}">← Manage ${esc(target.username)}</a> · <a href="/admin/usage">All usage</a></p>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">${esc(target.username)}'s usage</h2>
+        ${windowSelector(`/admin/users/${target.id}/usage`, since)}
+      </div>
+      ${usageCards(summary)}
+      <div style="margin-top:1rem">${svgBars(days, (d) => d.requests, 'Requests per day')}</div>
+      <div style="margin-top:1rem">${svgBars(days, (d) => d.total_tokens, 'Total tokens per day')}</div>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">By model</h2>
+      ${modelTable(byModel, summary.total_tokens)}
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Recent requests</h2>
+      ${recentTable(recent)}
+    </div>`,
+    admin
+  );
+}
+
+export function examplesPage(user: User, gatewayBase: string): string {
+  const key = 'YOUR_CPX_KEY';
+  const openai = `curl ${gatewayBase}/v1/chat/completions \\
+  -H "Authorization: Bearer ${key}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Say hello in one sentence."}]
+  }'`;
+  const responses = `curl ${gatewayBase}/v1/responses \\
+  -H "Authorization: Bearer ${key}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "gpt-5.5",
+    "input": "Say hello in one sentence."
+  }'`;
+  const anthropic = `curl ${gatewayBase}/v1/messages \\
+  -H "x-api-key: ${key}" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "claude-opus-4.8",
+    "max_tokens": 256,
+    "messages": [{"role": "user", "content": "Say hello in one sentence."}]
+  }'`;
+  const claudeCode = `{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "ANTHROPIC_BASE_URL": "${gatewayBase}",
+    "ANTHROPIC_AUTH_TOKEN": "${key}",
+    "ANTHROPIC_MODEL": "claude-opus-4.8"
+  }
+}`;
+  const codex = `[model_providers.copilot-proxy]
+name = "copilot-proxy"
+base_url = "${gatewayBase}/v1"
+wire_api = "responses"
+env_key = "CPX_KEY"`;
+  return layout(
+    'Examples',
+    `<p><a href="/dashboard">← My dashboard</a></p>
+    <div class="card">
+      <h2 style="margin-top:0">Client examples</h2>
+      <p class="muted">Replace <code>${key}</code> with one of your API keys from the dashboard. The endpoint is the same for everyone.</p>
+      <p>Endpoint: <code>${esc(gatewayBase)}</code></p>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Try it in your browser</h2>
+      <p class="muted">Pick a model and send a real request straight from this page. Your API key stays in the browser — it's sent only to the proxy at <code>${esc(gatewayBase)}</code>, never to the control-plane. (The proxy allows these cross-origin browser calls via CORS.)</p>
+      <p><input id="cpxkey" type="password" placeholder="cpx-… (paste one of your keys)" style="width:100%"></p>
+      <p style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
+        <select id="surface">
+          <option value="chat">chat/completions</option>
+          <option value="responses">responses (gpt-5.x)</option>
+          <option value="messages">messages (Anthropic)</option>
+        </select>
+        <select id="model" style="flex:1;min-width:200px">
+          <option value="">— Load models, or pick a default —</option>
+          <option value="gpt-4o">gpt-4o</option>
+          <option value="gpt-5.4">gpt-5.4</option>
+          <option value="claude-opus-4.8">claude-opus-4.8</option>
+          <option value="claude-sonnet-4.6">claude-sonnet-4.6</option>
+        </select>
+        <button type="button" onclick="cpxLoadModels()" class="secondary">Load models</button>
+      </p>
+      <p><textarea id="prompt" style="width:100%;height:3.5rem">Say hello in one sentence.</textarea></p>
+      <p><button type="button" onclick="cpxSend()">Send test request</button> <span id="teststatus" class="pill muted">idle</span></p>
+      <pre id="out" class="muted">Response will appear here.</pre>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">OpenAI · chat/completions</h2>
+      <pre>${esc(openai)}</pre>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">OpenAI · responses (gpt-5.x reasoning models)</h2>
+      <p class="muted">gpt-5.x reasoning models require <code>/v1/responses</code>, not chat/completions.</p>
+      <pre>${esc(responses)}</pre>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Anthropic · messages</h2>
+      <pre>${esc(anthropic)}</pre>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Claude Code · ~/.claude/settings.json</h2>
+      <pre>${esc(claudeCode)}</pre>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Codex · ~/.codex/config.toml</h2>
+      <pre>${esc(codex)}</pre>
+    </div>
+    <script>
+      const CPX_PROXY = ${JSON.stringify(gatewayBase)};
+      function cpxEl(id){ return document.getElementById(id); }
+      function cpxStatus(msg, cls){ var el=cpxEl('teststatus'); el.className='pill '+cls; el.textContent=msg; }
+      async function cpxLoadModels(){
+        var key=cpxEl('cpxkey').value.trim();
+        if(!key){ cpxStatus('Enter your API key first','err'); return; }
+        cpxStatus('Loading models…','warn');
+        try{
+          var r=await fetch(CPX_PROXY+'/v1/models',{headers:{Authorization:'Bearer '+key}});
+          var d=await r.json();
+          var list=(d&&d.data)||[];
+          var sel=cpxEl('model');
+          var prev=sel.value;
+          sel.innerHTML='';
+          list.map(function(m){ return (m&&m.id)||m; })
+            .sort()
+            .forEach(function(id){ var o=document.createElement('option'); o.value=id; o.textContent=id; sel.appendChild(o); });
+          if(prev && list.some(function(m){ return ((m&&m.id)||m)===prev; })){ sel.value=prev; }
+          cpxStatus('Loaded '+list.length+' models','ok');
+        }catch(e){ cpxStatus('Failed to load models: '+e.message,'err'); }
+      }
+      async function cpxSend(){
+        var key=cpxEl('cpxkey').value.trim();
+        var model=cpxEl('model').value.trim();
+        var surface=cpxEl('surface').value;
+        var prompt=cpxEl('prompt').value;
+        if(!key||!model){ cpxStatus('Need an API key and a model','err'); return; }
+        var url, body, headers={'Content-Type':'application/json'};
+        if(surface==='messages'){
+          url=CPX_PROXY+'/v1/messages';
+          headers['x-api-key']=key; headers['anthropic-version']='2023-06-01';
+          body={model:model,max_tokens:256,messages:[{role:'user',content:prompt}]};
+        } else if(surface==='responses'){
+          url=CPX_PROXY+'/v1/responses';
+          headers['Authorization']='Bearer '+key;
+          body={model:model,input:prompt};
+        } else {
+          url=CPX_PROXY+'/v1/chat/completions';
+          headers['Authorization']='Bearer '+key;
+          body={model:model,messages:[{role:'user',content:prompt}]};
+        }
+        cpxStatus('Sending…','warn');
+        cpxEl('out').textContent='';
+        try{
+          var r=await fetch(url,{method:'POST',headers:headers,body:JSON.stringify(body)});
+          var text=await r.text();
+          var pretty=text; try{ pretty=JSON.stringify(JSON.parse(text),null,2); }catch(_e){}
+          cpxEl('out').textContent=pretty;
+          cpxStatus('HTTP '+r.status,r.ok?'ok':'err');
+        }catch(e){ cpxStatus('Request failed: '+e.message,'err'); cpxEl('out').textContent=String(e); }
+      }
+    </script>`,
+    user
   );
 }

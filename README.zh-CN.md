@@ -66,7 +66,7 @@ sequenceDiagram
     C->>P: POST /v1/chat/completions<br/>Authorization: Bearer cpx-...
     P->>DB: resolveTenant(sha256(key)) → 用户 + 账号（只读）
     Note over P: key 无效→401；用户被禁用/未绑定→403
-    P->>P: 解密 GitHub token；签发或复用缓存的 Copilot token
+    P->>P: 解密 GitHub token，签发或复用缓存的 Copilot token
     P->>GH: 用该租户的 Copilot token 转发（按需翻译）
     GH-->>P: 模型响应（含 SSE 流）
     P-->>C: 原样流式回传
@@ -100,6 +100,9 @@ curl http://localhost:4000/v1/chat/completions \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
 ```
 
+6. 在 **Dashboard → Usage & stats** 查看用量，或在 **Dashboard → Client examples**
+   直接从浏览器发测试请求（选模型、Send）。管理员在 **Admin → Usage & stats** 看全局。
+
 ## 本地开发
 
 ```bash
@@ -114,6 +117,11 @@ npm run dev:proxy
 > 两个服务必须指向**同一个** SQLite 文件。`npm -w <pkg> run` 会把工作目录切到子包目录，
 > 因此相对的 `CPX_DB_PATH` 会被解析到各自的包目录，导致数据库被悄悄分裂。`dev:*`
 > 脚本和 compose 文件都使用绝对路径以规避此问题。
+
+> `dev:*` 脚本还会自动加载 `.env`（`set -a; . ./.env; set +a`）—— `tsx` 和 `bun` 都不会
+> 自己读仓库根的 `.env`，而缺了 `CPX_MASTER_KEY` 控制面就解不开已存的 token（届时每个
+> 账号都会显示 `error`）。本地开发时代理直接监听 `CPX_GATEWAY_PORT`（4000）；内部的
+> `4141` 只在 Docker 里有意义，compose 会把 `4000→4141` 做映射。
 
 代理运行在 **Bun** 上（用内置的 `bun:sqlite` 读共享 DB、用 `node:crypto` 解密 token）。
 绑定时不再启动任何容器 —— 代理在请求时直接使用存好的 GitHub token。
@@ -135,34 +143,41 @@ npm run dev:proxy
 - 被停用的用户、被吊销的 key 会被代理在**实时**拒绝（无需等健康探测）。
 - 在代理上设置 `CPX_VERBOSE=1`，可在服务端日志中开启更详细的上游日志。
 
-## Token 计量
+## 用量计量与看板
 
-网关的 `usage_logs` 表**每次调用记录一行**（谁 / 哪个账号 / 路径 / 模型 / HTTP 状态码 /
-时间戳）—— **不**存储 token 数量。可直接查询：
+每一次模型调用都会被计量。代理里有一个**响应边界中间件**解析上游的 `usage` 块 —— 非流式
+JSON 直接读，流式 SSE 则**分流（tee）**解析（发给客户端的字节不受影响）—— 并向 `usage_logs`
+**每次调用写一行**：用户 / 账号 / key / 端点 / 模型 / HTTP 状态 / 是否流式，外加
+`prompt_tokens`、`completion_tokens`、`cached_tokens`、`reasoning_tokens`、`total_tokens`、
+`duration_ms`、`ttfb_ms`。**prompt 与响应内容一律不存**，只存计数。
+
+控制面把这些数据渲染成看板：
+
+| 页面 | 谁可见 | 内容 |
+| --- | --- | --- |
+| `/dashboard/usage` | 每个用户 | 概要卡片、每日请求/token 趋势图、按模型明细、最近请求 |
+| `/admin/usage` | 管理员 | 全局总量、Top 用户、按模型分布、最近请求、CSV 导出 |
+| `/admin/users/:id/usage` | 管理员 | 单个用户的用量 |
+
+所有视图支持 `?days=7\|30\|90` 时间窗。token / 费用数值仍来自上游模型响应，各接口对应字段：
+
+| 接口 | 响应中的 token 字段 |
+| --- | --- |
+| OpenAI Chat Completions | `usage.prompt_tokens`、`usage.completion_tokens`、`usage.total_tokens` |
+| OpenAI Responses | `usage.input_tokens`、`usage.output_tokens`；另有 `copilot_usage.total_nano_aiu`（计费单位） |
+| Anthropic Messages | `usage.input_tokens`、`usage.output_tokens`、`usage.cache_read_input_tokens` |
+
+说明：
+- 该链路上 prompt caching 真实生效：配合 Anthropic 的 `cache_control`，热调用会显示
+  `cache_read_input_tokens` > 0，计费 input 降到只剩新增 token —— 在看板上体现为**缓存命中率**。
+- 也可随时直接查原始表：
 
 ```bash
 docker compose exec -T control-plane node -e "
 const db=require('better-sqlite3')('/app/data/cpx.db');
-console.table(db.prepare('SELECT id,user_id,account_id,path,model,status_code,created_at FROM usage_logs ORDER BY id DESC LIMIT 20').all());
+console.table(db.prepare('SELECT id,user_id,model,status_code,prompt_tokens,completion_tokens,total_tokens,duration_ms,created_at FROM usage_logs ORDER BY id DESC LIMIT 20').all());
 "
 ```
-
-token 消耗本身由**上游模型在响应体里返回**，而不是由代理统计。具体读哪个字段取决于你调用的接口：
-
-| 接口 | 路径 | 响应 JSON 中的 token 字段 |
-| --- | --- | --- |
-| OpenAI Chat Completions | `/v1/chat/completions` | `usage.prompt_tokens`、`usage.completion_tokens`、`usage.total_tokens` |
-| OpenAI Responses | `/v1/responses` | `usage.input_tokens`、`usage.output_tokens`；另有 `copilot_usage.token_details[]`（按类型给出 `token_count`：`input` / `output` / `cache_read`）和 `copilot_usage.total_nano_aiu`（计费单位） |
-| Anthropic Messages | `/v1/messages` | `usage.input_tokens`、`usage.output_tokens`、`usage.cache_read_input_tokens`（缓存命中） |
-
-说明：
-- **流式**请求下，OpenAI 只有在你传了 `"stream_options": {"include_usage": true}` 时，
-  才会在最后一个 chunk 里带上 `usage`；Anthropic 默认会在 `message_delta` / 末尾事件里返回 usage。
-- 网关目前**不**把这些字段解析进数据库（它原样反向代理字节流）。若要按 token 计量，
-  要么让客户端自己读取每次响应里的 `usage`，要么扩展代理嗅探末尾的 `usage`，
-  并在 `usage_logs` 中新增 `prompt/completion/total` 列。
-- 该链路上 prompt caching 是真实生效的：配合 Anthropic 的 `cache_control`，热调用会显示
-  `cache_read_input_tokens` > 0，计费 input 降到只剩新增的 token。
 
 ## 说明 / 限制（demo 阶段）
 
