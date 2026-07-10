@@ -2,73 +2,74 @@
 
 在**同一个共享 API 地址**背后，集中管理多个 GitHub Copilot 账号。
 每个团队成员登录平台网页，绑定自己的 GitHub Copilot 账号（通过 GitHub 设备码授权），
-并获得一个专属 API key。所有人调用同一个网关地址，用各自的 key 即可访问自己账号下的 Copilot 模型。
+并获得一个专属 API key。所有人调用同一个代理地址，用各自的 key 即可访问自己账号下的 Copilot 模型。
 
 > English version: [README.md](README.md)
 
 ## 架构
+
+**单进程、多租户**设计：一个代理进程服务所有用户，按请求选择对应的 GitHub → Copilot
+token。**不再为每个用户开一个容器。**
 
 ```mermaid
 flowchart LR
     client[API 客户端<br/>Bearer cpx-key]
 
     subgraph host[宿主机 · Docker]
-        gateway[gateway :4000<br/>共享 API 地址]
+        proxy[proxy :4000<br/>鉴权 + token 管理 + 转发]
         cp[control-plane :8080<br/>网页 · 绑定 · 健康探测]
         db[(SQLite<br/>cpx.db)]
-        accts[cpx-acct-1..N<br/>copilot-proxy-api]
     end
 
     github[(GitHub Copilot)]
 
-    client --> gateway
-    gateway --> db
-    gateway --> accts
+    client --> proxy
+    proxy --> db
+    proxy --> github
     cp --> db
-    cp --> accts
     cp --> github
-    accts --> github
 ```
 
 - **control-plane（控制面，`:8080`）** — 平台网页：本地账号登录、管理员用户管理、
-  API key 管理、GitHub 设备码绑定。绑定成功后会为每个账号启动一个
-  `copilot-proxy-api` 容器（完整兼容 OpenAI + Anthropic + Codex，使用未修改的上游镜像）。
-- **gateway（网关，`:4000`）** — 唯一对外的共享 API 地址。把 `Bearer <cpx-key>`
-  解析为 用户 → 账号容器，然后反向代理（支持流式）。
-- **每账号容器 `cpx-acct-<id>`** — 每个账号一个 `copilot-proxy-api`，作为宿主机 Docker
-  守护进程上的兄弟容器，加入 `cpx-net` 网络。仅内部可见，不向宿主机暴露端口。
+  API key 管理、GitHub 设备码绑定。绑定时只**存储该账号加密后的 GitHub token** 并校验
+  其有效性（不再启动任何容器）。
+- **proxy（代理，`:4000`）** — 唯一对外的共享 API 地址，**同时**是多租户 Copilot 代理，
+  合并在同一个进程里（fork 自
+  [`voidsteed/copilot-proxy-api`](https://github.com/voidsteed/copilot-proxy-api)，
+  MIT，运行在 Bun 上）。它把 `Bearer <cpx-key>` 解析为 用户 → 该账号的 GitHub token，
+  据此签发并缓存该账号的短期 Copilot token，再提供完整的 OpenAI + Anthropic + Codex
+  兼容接口（支持流式）。
 - **SQLite（`./data/cpx.db`）** — 用户、哈希后的 API key、加密的 GitHub token、用量日志。
+  控制面写入，代理只读。
 
-GitHub token 使用 `CPX_MASTER_KEY` 通过 AES-256-GCM 加密存储。
+GitHub token 使用 `CPX_MASTER_KEY` 通过 AES-256-GCM 加密存储，只有在请求需要时才在代理
+进程内存中解密。
+
+> **一句话说清这个 fork。** 上游代理用一个全局的 `state.copilotToken`。fork 把它换成基于
+> `AsyncLocalStorage` 的覆盖层：鉴权中间件把调用方的 `cpx-` key 解析成 GitHub token，
+> 签发/缓存该账号的 Copilot token，并在一个"租户上下文"里执行请求。于是原代码里所有对
+> `state.copilotToken` 的读取都自动变成按租户取值，**翻译层一行都不用改**。见
+> [proxy/src/cpx/](proxy/src/cpx/) 和 [proxy/src/lib/state.ts](proxy/src/lib/state.ts)。
 
 ### 请求数据流
 
-一次客户端调用按 `key → 用户 → 账号 → 容器` 逐跳解析（全部是 SQLite 查询），
-然后网关把请求以字节流方式反向代理到该账号对应的上游代理容器，并在响应结束时
-记录一行用量日志。
+一次客户端调用按 `key → 用户 → 账号 → GitHub token` 逐跳解析（全部是 SQLite 查询），
+代理据此签发/复用该账号的 Copilot token，转发给 GitHub Copilot，并原样流式回传响应。
 
 ```mermaid
 sequenceDiagram
     participant C as 客户端<br/>Bearer cpx-key
-    participant G as gateway :4000
+    participant P as proxy :4000
     participant DB as SQLite cpx.db
-    participant A as cpx-acct-N<br/>copilot-proxy-api :4141
     participant GH as GitHub Copilot
 
-    C->>G: POST /v1/chat/completions<br/>Authorization: Bearer cpx-...
-    G->>G: extractKey() 取出 key
-    G->>DB: findActiveKeyByHash(sha256(key))
-    DB-->>G: api_keys 行 → user_id
-    G->>DB: getUserById(user_id)（校验 status）
-    G->>DB: getAccountByUser(user_id)（container_name/status）
-    Note over G: 校验用户未禁用 且 account.status == running
-    G->>G: 缓冲 body，解析 model 字段
-    G->>A: 反向代理到 http://cpx-acct-N:4141
-    A->>GH: 用内部 Copilot token 请求真正上游
-    GH-->>A: 模型响应（含 SSE 流）
-    A-->>G: 透传响应
-    G-->>C: 原样流式回传
-    G->>DB: res.finish 后 logUsage(...)
+    C->>P: POST /v1/chat/completions<br/>Authorization: Bearer cpx-...
+    P->>DB: resolveTenant(sha256(key)) → 用户 + 账号（只读）
+    Note over P: key 无效→401；用户被禁用/未绑定→403
+    P->>P: 解密 GitHub token；签发或复用缓存的 Copilot token
+    P->>GH: 用该租户的 Copilot token 转发（按需翻译）
+    GH-->>P: 模型响应（含 SSE 流）
+    P-->>C: 原样流式回传
 ```
 
 ## 快速开始
@@ -87,7 +88,7 @@ docker compose up --build -d
    `CPX_ADMIN_PASS`）。
 2. 管理员 → 为团队成员创建用户。
 3. 作为用户：点击 **Connect GitHub Copilot** → 打开页面给出的链接，输入验证码，
-   完成授权。对应的账号代理容器会自动启动。
+   完成授权。账号 token 会被存储并校验（不再启动任何容器）。
 4. 在面板上 **Create API key**（只显示一次，请立即复制）。
 5. 使用统一的 API 地址：
 
@@ -99,42 +100,40 @@ curl http://localhost:4000/v1/chat/completions \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-## 本地开发（两个服务不走 Docker）
+## 本地开发
 
 ```bash
-npm install
-# 终端 1（dev 脚本会自动固定一个共享的绝对 DB 路径）
+npm install                       # control-plane + shared（Node）
+# 终端 1 —— 控制面（Node/tsx）
 npm run dev:cp
-# 终端 2
-npm run dev:gw
+# 终端 2 —— 代理（Bun；从 https://bun.sh 安装）
+( cd proxy && bun install )       # 仅首次
+npm run dev:proxy
 ```
 
 > 两个服务必须指向**同一个** SQLite 文件。`npm -w <pkg> run` 会把工作目录切到子包目录，
 > 因此相对的 `CPX_DB_PATH` 会被解析到各自的包目录，导致数据库被悄悄分裂。`dev:*`
 > 脚本和 compose 文件都使用绝对路径以规避此问题。
 
-注意：绑定时仍会通过本地 Docker 守护进程启动真实的 `copilot-proxy-api` 容器，
-网关通过容器名访问它们 —— 所以要端到端代理，需让网关运行在 `cpx-net` 内
-（即通过 `docker compose` 启动）。
+代理运行在 **Bun** 上（用内置的 `bun:sqlite` 读共享 DB、用 `node:crypto` 解密 token）。
+绑定时不再启动任何容器 —— 代理在请求时直接使用存好的 GitHub token。
 
-## 网关错误码
+## 代理错误码
 
-网关返回可预测的状态码。控制面有一个后台健康探测，每 30 秒探测一次每个账号并校正
-`account.status`，因此账号登出 / 不健康时会稳定返回干净的 `503`，而不是时好时坏的
-`502` / `401`。
+鉴权 / 路由类错误统一用 `{"error":{"message","type"}}` 结构。控制面有一个后台探测，
+默认每 60 秒通过 Copilot token 交换重新校验每个账号的 GitHub token，并校正 `account.status`。
 
 | HTTP | `error.type` | 何时出现 |
 | --- | --- | --- |
-| 401 | （缺失/无效） | 没有 key、未知 key、或已吊销的 key |
-| 403 | （未绑定） | key 有效，但该用户尚未绑定 Copilot 账号 |
-| 503 | `account_not_ready` | 账号处于 `pending` / `stopped` / `error`（例如 GitHub 已登出——容器无法启动） |
-| 502 | `upstream_unavailable` | 容器本应运行却不可达（临时故障）。内部容器名绝不外泄 |
-| 200 + 上游状态码 | — | 健康；上游 copilot-proxy-api 的响应原样透传 |
+| 401 | `authentication_error` | 没有 key、未知 key、或已吊销的 key |
+| 403 | `account_disabled` | 该用户被管理员停用 |
+| 403 | `account_unbound` | key 有效，但该用户尚未绑定 Copilot 账号 |
+| 403 | `account_not_ready` | 已绑定，但 GitHub token 无法换取 Copilot token（登出 / 被吊销） |
+| 200 + 上游状态码 | — | 健康；fork 版 copilot-proxy-api 的响应原样透传 |
 
 说明：
-- 当某个 GitHub 账号登出 / token 被吊销时，对应的 `copilot-proxy-api` 容器会在启动时
-  的 token 校验失败并退出，因此健康探测会把账号标记为 `stopped`/`error` → 网关返回 `503`。
-- 在网关上设置 `CPX_VERBOSE=1`，可在服务端日志中记录 `502` 背后真实的上游错误。
+- 被停用的用户、被吊销的 key 会被代理在**实时**拒绝（无需等健康探测）。
+- 在代理上设置 `CPX_VERBOSE=1`，可在服务端日志中开启更详细的上游日志。
 
 ## Token 计量
 
@@ -160,7 +159,7 @@ token 消耗本身由**上游模型在响应体里返回**，而不是由代理�
 - **流式**请求下，OpenAI 只有在你传了 `"stream_options": {"include_usage": true}` 时，
   才会在最后一个 chunk 里带上 `usage`；Anthropic 默认会在 `message_delta` / 末尾事件里返回 usage。
 - 网关目前**不**把这些字段解析进数据库（它原样反向代理字节流）。若要按 token 计量，
-  要么让客户端自己读取每次响应里的 `usage`，要么扩展网关嗅探末尾的 `usage`，
+  要么让客户端自己读取每次响应里的 `usage`，要么扩展代理嗅探末尾的 `usage`，
   并在 `usage_logs` 中新增 `prompt/completion/total` 列。
 - 该链路上 prompt caching 是真实生效的：配合 Anthropic 的 `cache_control`，热调用会显示
   `cache_read_input_tokens` > 0，计费 input 降到只剩新增的 token。
@@ -168,7 +167,9 @@ token 消耗本身由**上游模型在响应体里返回**，而不是由代理�
 ## 说明 / 限制（demo 阶段）
 
 - 会话存储在内存中；重启 control-plane 会让用户登出。
-- 容器常驻运行（不做空闲停止）。10–50 个账号没问题；规模更大时注意内存
-  （每个空闲代理约 40–90 MB）。
+- **单进程、多租户**：所有租户由同一个 Bun 进程服务，因此每个已绑定账号的 GitHub token
+  会在用到时于该进程内存中解密（静态存储仍是 AES 加密）。这用「牺牲逐账号隔离」换来了
+  「一个进程而非每人一个容器」的极小开销。
 - 跨多个账号的大量自动化流量可能触发 GitHub 滥用检测。
-- 本项目依赖逆向的 Copilot API；请自行确认是否符合 GitHub Copilot 条款。
+- 代理是 [`voidsteed/copilot-proxy-api`](https://github.com/voidsteed/copilot-proxy-api)
+  的 fork（MIT）；它依赖逆向的 Copilot API，请自行确认是否符合 GitHub Copilot 条款。

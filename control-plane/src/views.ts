@@ -82,7 +82,7 @@ export function dashboardPage(
         ${account.last_error ? `<p class="pill err">${esc(account.last_error)}</p>` : ''}
         <form class="inline" method="post" action="/connect"><button class="secondary">Re-bind</button></form>
         <form class="inline" method="post" action="/disconnect"><button class="secondary">Disconnect</button></form>
-        <form class="inline" method="post" action="/restart"><button class="secondary">Restart container</button></form>
+        <form class="inline" method="post" action="/restart"><button class="secondary">Re-check</button></form>
       </div>`
     : `<div class="card">
         <h2 style="margin-top:0">GitHub Copilot binding</h2>

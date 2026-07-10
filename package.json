@@ -5,13 +5,12 @@
   "type": "module",
   "workspaces": [
     "shared",
-    "control-plane",
-    "gateway"
+    "control-plane"
   ],
   "scripts": {
     "dev:cp": "CPX_DB_PATH=\"$PWD/data/cpx.db\" npm -w control-plane run dev",
-    "dev:gw": "CPX_DB_PATH=\"$PWD/data/cpx.db\" npm -w gateway run dev",
-    "build": "npm -w control-plane run build && npm -w gateway run build"
+    "dev:proxy": "CPX_DB_PATH=\"$PWD/data/cpx.db\" bash -c 'cd proxy && bun run src/cpx/main.ts'",
+    "build": "npm -w control-plane run build"
   },
   "engines": {
     "node": ">=20"

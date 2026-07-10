@@ -5,7 +5,6 @@ WORKDIR /app
 COPY package.json ./
 COPY shared/package.json ./shared/
 COPY control-plane/package.json ./control-plane/
-COPY gateway/package.json ./gateway/
 
 RUN npm install
 

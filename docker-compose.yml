@@ -10,28 +10,23 @@ services:
       - "${CPX_CONTROL_PLANE_PORT:-8080}:8080"
     volumes:
       - ./data:/app/data
-      # Manage sibling per-account proxy containers on the host daemon.
-      - /var/run/docker.sock:/var/run/docker.sock
-    networks:
-      - cpx-net
     restart: unless-stopped
 
-  gateway:
+  proxy:
     build:
-      context: .
-      dockerfile: gateway/Dockerfile
+      context: ./proxy
+      dockerfile: Dockerfile.mt
     env_file: .env
     environment:
       CPX_DB_PATH: /app/data/cpx.db
+      CPX_PROXY_PORT: 4141
     ports:
-      - "${CPX_GATEWAY_PORT:-4000}:4000"
+      # Unified public API endpoint (same for every user).
+      - "${CPX_GATEWAY_PORT:-4000}:4141"
     volumes:
+      # Shared SQLite DB written by the control-plane.
       - ./data:/app/data
-    networks:
-      - cpx-net
     restart: unless-stopped
+    depends_on:
+      - control-plane
 
-networks:
-  cpx-net:
-    name: cpx-net
-    driver: bridge

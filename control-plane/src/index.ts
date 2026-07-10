@@ -26,13 +26,7 @@ import {
   requestDeviceCode,
   type DeviceCodeResponse,
 } from './githubDeviceFlow.js';
-import {
-  containerNameFor,
-  ensureImage,
-  ensureNetwork,
-  startAccountContainer,
-  stopAccountContainer,
-} from './docker.js';
+import { checkCopilotAccess } from './copilotCheck.js';
 import { startHealthMonitor } from './health.js';
 import { adminPage, adminUserPage, connectPage, dashboardPage, loginPage } from './views.js';
 
@@ -199,41 +193,38 @@ app.get('/connect/status', requireAuth, async (req, res) => {
 
 async function bindAccount(userId: number, ghToken: string): Promise<void> {
   const login = await fetchGithubLogin(ghToken);
-  const account = upsertAccount(userId, encryptSecret(ghToken), login, containerNameFor(0));
-  // container name depends on account id, which we now have
-  const containerName = containerNameFor(account.id);
-  upsertAccount(userId, encryptSecret(ghToken), login, containerName);
-  try {
-    await ensureNetwork();
-    await ensureImage();
-    await startAccountContainer(account.id, ghToken);
+  // No per-account container anymore: the multi-tenant proxy resolves the key
+  // to this token at request time. We just persist the encrypted token and
+  // validate that it can currently mint a Copilot token.
+  const account = upsertAccount(userId, encryptSecret(ghToken), login, 'single-process');
+  const check = await checkCopilotAccess(ghToken);
+  if (check.ok) {
     setAccountStatus(account.id, 'running');
-  } catch (e) {
-    setAccountStatus(account.id, 'error', (e as Error).message);
+  } else {
+    setAccountStatus(account.id, 'error', check.error);
   }
 }
 
-app.post('/disconnect', requireAuth, async (req, res) => {
+app.post('/disconnect', requireAuth, (req, res) => {
   const user = (req as Request & { user: User }).user;
   const account = getAccountByUser(user.id);
   if (account) {
-    await stopAccountContainer(account.id).catch(() => {});
     deleteAccount(user.id);
   }
   res.redirect('/dashboard');
 });
 
 app.post('/restart', requireAuth, async (req, res) => {
+  // Re-validate the stored token (button labelled "Re-check" in the UI).
   const user = (req as Request & { user: User }).user;
   const account = getAccountByUser(user.id);
   if (!account) return res.redirect('/dashboard');
-  try {
-    const { decryptSecret } = await import('@cpx/shared');
-    await ensureNetwork();
-    await startAccountContainer(account.id, decryptSecret(account.gh_token_enc));
+  const { decryptSecret } = await import('@cpx/shared');
+  const check = await checkCopilotAccess(decryptSecret(account.gh_token_enc));
+  if (check.ok) {
     setAccountStatus(account.id, 'running');
-  } catch (e) {
-    setAccountStatus(account.id, 'error', (e as Error).message);
+  } else {
+    setAccountStatus(account.id, 'error', check.error);
   }
   res.redirect('/dashboard');
 });
@@ -256,16 +247,16 @@ app.post('/admin/users', requireAuth, requireAdmin, (req, res) => {
   res.redirect('/admin');
 });
 
-app.post('/admin/users/:id/disable', requireAuth, requireAdmin, async (req, res) => {
+app.post('/admin/users/:id/disable', requireAuth, requireAdmin, (req, res) => {
   const admin = (req as Request & { user: User }).user;
   const id = Number(req.params.id);
   const target = getUserById(id);
   if (target && target.id !== admin.id) {
     setUserStatus(id, 'disabled');
-    // Stop the account container so the disabled user can't be proxied.
+    // The proxy rejects a disabled user's key in real time (403), so no
+    // container teardown is needed. Mark the binding stopped for the UI.
     const account = getAccountByUser(id);
     if (account) {
-      await stopAccountContainer(account.id).catch(() => {});
       setAccountStatus(account.id, 'stopped', 'user disabled');
     }
   }
@@ -278,13 +269,11 @@ app.post('/admin/users/:id/enable', requireAuth, requireAdmin, (req, res) => {
   res.redirect('/admin');
 });
 
-app.post('/admin/users/:id/delete', requireAuth, requireAdmin, async (req, res) => {
+app.post('/admin/users/:id/delete', requireAuth, requireAdmin, (req, res) => {
   const admin = (req as Request & { user: User }).user;
   const id = Number(req.params.id);
   const target = getUserById(id);
   if (target && target.id !== admin.id) {
-    const account = getAccountByUser(id);
-    if (account) await stopAccountContainer(account.id).catch(() => {});
     deleteUser(id); // api_keys + accounts cascade
   }
   res.redirect('/admin');
