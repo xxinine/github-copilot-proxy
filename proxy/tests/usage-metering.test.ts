@@ -54,13 +54,18 @@ describe("normalizeUsage", () => {
       type: "message_start",
       message: {
         model: "claude-opus-4.8",
-        usage: { input_tokens: 12, cache_read_input_tokens: 12825 },
+        usage: {
+          input_tokens: 12,
+          cache_read_input_tokens: 12825,
+          cache_creation_input_tokens: 300,
+        },
       },
     })
     expect(usage).toMatchObject({
       model: "claude-opus-4.8",
       promptTokens: 12,
       cachedTokens: 12825,
+      cacheWriteTokens: 300,
     })
   })
 

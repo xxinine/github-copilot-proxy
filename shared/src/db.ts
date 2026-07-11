@@ -62,6 +62,7 @@ function migrate(d: Database.Database): void {
       prompt_tokens INTEGER,
       completion_tokens INTEGER,
       cached_tokens INTEGER,
+      cache_write_tokens INTEGER,
       reasoning_tokens INTEGER,
       total_tokens INTEGER,
       cost_nano_aiu INTEGER,
@@ -97,6 +98,7 @@ function migrate(d: Database.Database): void {
     ['prompt_tokens', 'INTEGER'],
     ['completion_tokens', 'INTEGER'],
     ['cached_tokens', 'INTEGER'],
+    ['cache_write_tokens', 'INTEGER'],
     ['reasoning_tokens', 'INTEGER'],
     ['total_tokens', 'INTEGER'],
     ['cost_nano_aiu', 'INTEGER'],
@@ -244,6 +246,7 @@ export interface UsageInsert {
   prompt_tokens?: number | null;
   completion_tokens?: number | null;
   cached_tokens?: number | null;
+  cache_write_tokens?: number | null;
   reasoning_tokens?: number | null;
   total_tokens?: number | null;
   cost_nano_aiu?: number | null;
@@ -257,9 +260,9 @@ export function logUsage(entry: UsageInsert): void {
     .prepare(
       `INSERT INTO usage_logs (
         user_id, account_id, api_key_id, path, endpoint_kind, model, status_code,
-        stream, prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens,
-        total_tokens, cost_nano_aiu, duration_ms, ttfb_ms, error_type
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        stream, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens,
+        reasoning_tokens, total_tokens, cost_nano_aiu, duration_ms, ttfb_ms, error_type
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       entry.user_id,
@@ -273,6 +276,7 @@ export function logUsage(entry: UsageInsert): void {
       entry.prompt_tokens ?? null,
       entry.completion_tokens ?? null,
       entry.cached_tokens ?? null,
+      entry.cache_write_tokens ?? null,
       entry.reasoning_tokens ?? null,
       entry.total_tokens ?? null,
       entry.cost_nano_aiu ?? null,
@@ -289,6 +293,7 @@ export interface UsageSummary {
   prompt_tokens: number;
   completion_tokens: number;
   cached_tokens: number;
+  cache_write_tokens: number;
   total_tokens: number;
   cost_nano_aiu: number;
 }
@@ -298,6 +303,8 @@ export interface UsageDay {
   requests: number;
   prompt_tokens: number;
   completion_tokens: number;
+  cached_tokens: number;
+  cache_write_tokens: number;
   total_tokens: number;
 }
 
@@ -307,6 +314,7 @@ export interface UsageByModel {
   prompt_tokens: number;
   completion_tokens: number;
   cached_tokens: number;
+  cache_write_tokens: number;
   total_tokens: number;
 }
 
@@ -314,6 +322,10 @@ export interface UsageByUser {
   user_id: number;
   username: string;
   requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  cache_write_tokens: number;
   total_tokens: number;
   cost_nano_aiu: number;
 }
@@ -327,6 +339,8 @@ export interface RecentUsage {
   stream: number;
   prompt_tokens: number | null;
   completion_tokens: number | null;
+  cached_tokens: number | null;
+  cache_write_tokens: number | null;
   total_tokens: number | null;
   duration_ms: number | null;
 }
@@ -351,6 +365,7 @@ export function usageSummary(userId: number | null, sinceDays = 30): UsageSummar
          COALESCE(SUM(prompt_tokens), 0)                     AS prompt_tokens,
          COALESCE(SUM(completion_tokens), 0)                 AS completion_tokens,
          COALESCE(SUM(cached_tokens), 0)                     AS cached_tokens,
+         COALESCE(SUM(cache_write_tokens), 0)                AS cache_write_tokens,
          COALESCE(SUM(total_tokens), 0)                      AS total_tokens,
          COALESCE(SUM(cost_nano_aiu), 0)                     AS cost_nano_aiu
        FROM usage_logs WHERE ${where}`
@@ -361,18 +376,45 @@ export function usageSummary(userId: number | null, sinceDays = 30): UsageSummar
 export function usageTimeseries(userId: number | null, sinceDays = 30): UsageDay[] {
   const where = userId == null ? sinceClause(sinceDays) : `user_id = ? AND ${sinceClause(sinceDays)}`;
   const params = userId == null ? [] : [userId];
-  return getDb()
+  const rows = getDb()
     .prepare(
       `SELECT
          substr(created_at, 1, 10)            AS day,
          COUNT(*)                             AS requests,
          COALESCE(SUM(prompt_tokens), 0)      AS prompt_tokens,
          COALESCE(SUM(completion_tokens), 0)  AS completion_tokens,
+         COALESCE(SUM(cached_tokens), 0)      AS cached_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
          COALESCE(SUM(total_tokens), 0)       AS total_tokens
        FROM usage_logs WHERE ${where}
        GROUP BY day ORDER BY day`
     )
     .all(...params) as UsageDay[];
+
+  // Zero-fill the full window so charts/tables always show every day (UTC),
+  // matching the ?days=7|30|90 selector even when most days have no traffic.
+  const n = Math.max(1, Math.floor(sinceDays));
+  const byDay = new Map(rows.map((r) => [r.day, r]));
+  const out: UsageDay[] = [];
+  const now = new Date();
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i)
+    );
+    const day = d.toISOString().slice(0, 10);
+    out.push(
+      byDay.get(day) ?? {
+        day,
+        requests: 0,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        cached_tokens: 0,
+        cache_write_tokens: 0,
+        total_tokens: 0,
+      }
+    );
+  }
+  return out;
 }
 
 export function usageByModel(userId: number | null, sinceDays = 30): UsageByModel[] {
@@ -386,6 +428,7 @@ export function usageByModel(userId: number | null, sinceDays = 30): UsageByMode
          COALESCE(SUM(prompt_tokens), 0)      AS prompt_tokens,
          COALESCE(SUM(completion_tokens), 0)  AS completion_tokens,
          COALESCE(SUM(cached_tokens), 0)      AS cached_tokens,
+         COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
          COALESCE(SUM(total_tokens), 0)       AS total_tokens
        FROM usage_logs WHERE ${where}
        GROUP BY model ORDER BY total_tokens DESC, requests DESC`
@@ -400,6 +443,10 @@ export function usageByUser(sinceDays = 30): UsageByUser[] {
          l.user_id                            AS user_id,
          COALESCE(u.username, '(deleted)')    AS username,
          COUNT(*)                             AS requests,
+         COALESCE(SUM(l.prompt_tokens), 0)    AS prompt_tokens,
+         COALESCE(SUM(l.completion_tokens), 0) AS completion_tokens,
+         COALESCE(SUM(l.cached_tokens), 0)    AS cached_tokens,
+         COALESCE(SUM(l.cache_write_tokens), 0) AS cache_write_tokens,
          COALESCE(SUM(l.total_tokens), 0)     AS total_tokens,
          COALESCE(SUM(l.cost_nano_aiu), 0)    AS cost_nano_aiu
        FROM usage_logs l
@@ -417,7 +464,8 @@ export function recentUsage(userId: number | null, limit = 50): RecentUsage[] {
   return getDb()
     .prepare(
       `SELECT id, created_at, endpoint_kind, model, status_code, stream,
-              prompt_tokens, completion_tokens, total_tokens, duration_ms
+              prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens,
+              total_tokens, duration_ms
        FROM usage_logs WHERE ${where}
        ORDER BY id DESC LIMIT ${n}`
     )

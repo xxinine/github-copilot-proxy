@@ -30,6 +30,7 @@ interface NormalizedUsage {
   promptTokens?: number
   completionTokens?: number
   cachedTokens?: number
+  cacheWriteTokens?: number
   reasoningTokens?: number
   totalTokens?: number
   costNanoAiu?: number
@@ -82,6 +83,10 @@ export function normalizeUsage(
     num(promptDetails?.cached_tokens)
     ?? num(inputDetails?.cached_tokens)
     ?? num(usage.cache_read_input_tokens)
+  // Anthropic reports cache writes separately (often omitted by this upstream).
+  const cacheWriteTokens =
+    num(usage.cache_creation_input_tokens)
+    ?? num(inputDetails?.cache_creation_tokens)
   const reasoningTokens =
     num(completionDetails?.reasoning_tokens)
     ?? num(outputDetails?.reasoning_tokens)
@@ -100,6 +105,7 @@ export function normalizeUsage(
     promptTokens,
     completionTokens,
     cachedTokens,
+    cacheWriteTokens,
     reasoningTokens,
     totalTokens,
     costNanoAiu,
@@ -118,6 +124,7 @@ export function mergeUsage(a: NormalizedUsage, b: NormalizedUsage): NormalizedUs
     promptTokens: maxDefined(a.promptTokens, b.promptTokens),
     completionTokens: maxDefined(a.completionTokens, b.completionTokens),
     cachedTokens: maxDefined(a.cachedTokens, b.cachedTokens),
+    cacheWriteTokens: maxDefined(a.cacheWriteTokens, b.cacheWriteTokens),
     reasoningTokens: maxDefined(a.reasoningTokens, b.reasoningTokens),
     totalTokens: maxDefined(a.totalTokens, b.totalTokens),
     costNanoAiu: maxDefined(a.costNanoAiu, b.costNanoAiu),
@@ -135,6 +142,7 @@ function persist(
       promptTokens: usage?.promptTokens,
       completionTokens: usage?.completionTokens,
       cachedTokens: usage?.cachedTokens,
+      cacheWriteTokens: usage?.cacheWriteTokens,
       reasoningTokens: usage?.reasoningTokens,
       totalTokens: usage?.totalTokens,
       costNanoAiu: usage?.costNanoAiu,

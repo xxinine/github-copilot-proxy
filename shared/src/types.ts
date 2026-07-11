@@ -41,6 +41,7 @@ export interface UsageLog {
   prompt_tokens: number | null;
   completion_tokens: number | null;
   cached_tokens: number | null;
+  cache_write_tokens: number | null;
   reasoning_tokens: number | null;
   total_tokens: number | null;
   cost_nano_aiu: number | null;

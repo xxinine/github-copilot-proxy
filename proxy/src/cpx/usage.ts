@@ -48,6 +48,7 @@ export interface UsageRow {
   promptTokens?: number
   completionTokens?: number
   cachedTokens?: number
+  cacheWriteTokens?: number
   reasoningTokens?: number
   totalTokens?: number
   costNanoAiu?: number
@@ -68,6 +69,7 @@ const COLUMNS = [
   "prompt_tokens",
   "completion_tokens",
   "cached_tokens",
+  "cache_write_tokens",
   "reasoning_tokens",
   "total_tokens",
   "cost_nano_aiu",
@@ -98,6 +100,7 @@ export function insertUsage(row: UsageRow): void {
       row.promptTokens ?? null,
       row.completionTokens ?? null,
       row.cachedTokens ?? null,
+      row.cacheWriteTokens ?? null,
       row.reasoningTokens ?? null,
       row.totalTokens ?? null,
       row.costNanoAiu ?? null,

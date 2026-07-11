@@ -310,7 +310,7 @@ app.get('/admin/usage', requireAuth, requireAdmin, (req, res) => {
 app.get('/admin/usage.csv', requireAuth, requireAdmin, (req, res) => {
   const days = parseDays(req);
   const rows = usageByUser(days);
-  const header = 'user_id,username,requests,total_tokens,cost_nano_aiu';
+  const header = 'user_id,username,requests,input_tokens,cached_tokens,cache_write_tokens,output_tokens,total_tokens,cost_nano_aiu';
   const csv = [
     header,
     ...rows.map((r) =>
@@ -318,6 +318,10 @@ app.get('/admin/usage.csv', requireAuth, requireAdmin, (req, res) => {
         r.user_id,
         '"' + String(r.username).replace(/"/g, '""') + '"',
         r.requests,
+        r.prompt_tokens,
+        r.cached_tokens,
+        r.cache_write_tokens,
+        r.completion_tokens,
         r.total_tokens,
         r.cost_nano_aiu,
       ].join(',')
