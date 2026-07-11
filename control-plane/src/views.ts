@@ -403,13 +403,16 @@ function fmtPct(part: number, whole: number): string {
   return `${Math.round((part / whole) * 100)}%`;
 }
 
-// Cache rate = cached-read share of readable input. Denominator is input + cached
-// so it stays 0–100% across both OpenAI (cached ⊆ prompt_tokens) and Anthropic
-// (input_tokens excludes cache_read) accounting.
+// Cache rate = cached-read share of total input. The proxy normalizes usage at
+// ingestion so cached reads are always a subset of `prompt_tokens`
+// (cached ⊆ input) for both OpenAI (native) and Anthropic (cache_read folded in)
+// shapes, so the denominator is simply the input tokens.
 function cacheRatePct(cached: number, input: number): string {
-  const denom = (input || 0) + (cached || 0);
-  if (!denom) return '—';
-  return `${Math.round(((cached || 0) / denom) * 100)}%`;
+  if (!input) return '—';
+  const pct = Math.round(((cached || 0) / input) * 100);
+  // Clamp to guard against legacy rows written before ingestion normalization,
+  // where Anthropic input excluded cache reads (cached could exceed input).
+  return `${Math.min(100, Math.max(0, pct))}%`;
 }
 
 function windowSelector(base: string, since: number): string {

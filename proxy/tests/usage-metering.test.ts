@@ -61,9 +61,11 @@ describe("normalizeUsage", () => {
         },
       },
     })
+    // Anthropic input_tokens EXCLUDES cache reads; normalization folds them back
+    // in so cached ⊆ promptTokens (12 + 12825), consistent with OpenAI accounting.
     expect(usage).toMatchObject({
       model: "claude-opus-4.8",
-      promptTokens: 12,
+      promptTokens: 12837,
       cachedTokens: 12825,
       cacheWriteTokens: 300,
     })
@@ -101,7 +103,7 @@ describe("mergeUsage", () => {
     const merged = mergeUsage(start, delta)
     expect(merged).toMatchObject({
       model: "claude-opus-4.8",
-      promptTokens: 12,
+      promptTokens: 12837,
       cachedTokens: 12825,
       completionTokens: 77,
     })

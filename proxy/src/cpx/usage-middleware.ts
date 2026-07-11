@@ -76,13 +76,27 @@ export function normalizeUsage(
     | Record<string, unknown>
     | undefined
 
-  const promptTokens = num(usage.prompt_tokens) ?? num(usage.input_tokens)
   const completionTokens =
     num(usage.completion_tokens) ?? num(usage.output_tokens)
-  const cachedTokens =
-    num(promptDetails?.cached_tokens)
-    ?? num(inputDetails?.cached_tokens)
-    ?? num(usage.cache_read_input_tokens)
+  // OpenAI (chat/responses) reports cached reads as a SUBSET of prompt/input
+  // tokens (cached ⊆ prompt). Anthropic reports them SEPARATELY in
+  // `cache_read_input_tokens`, with `input_tokens` EXCLUDING the cached reads.
+  const openAiCached =
+    num(promptDetails?.cached_tokens) ?? num(inputDetails?.cached_tokens)
+  const anthropicCached = num(usage.cache_read_input_tokens)
+  const cachedTokens = openAiCached ?? anthropicCached
+  let promptTokens = num(usage.prompt_tokens) ?? num(usage.input_tokens)
+  // Normalize so cached is always a subset of promptTokens (cached ⊆ prompt)
+  // across every shape. For Anthropic, fold the separately-reported cache reads
+  // back into promptTokens so downstream cache-rate = cached / prompt is correct
+  // and consistent with OpenAI accounting.
+  if (
+    promptTokens !== undefined
+    && openAiCached === undefined
+    && anthropicCached !== undefined
+  ) {
+    promptTokens += anthropicCached
+  }
   // Anthropic reports cache writes separately (often omitted by this upstream).
   const cacheWriteTokens =
     num(usage.cache_creation_input_tokens)
