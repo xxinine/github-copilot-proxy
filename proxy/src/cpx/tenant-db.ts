@@ -18,6 +18,34 @@ function getDb(): Database {
   return db
 }
 
+/**
+ * Read the admin `web_search_enabled` policy from the shared settings table.
+ * Cached briefly so we don't hit SQLite on every request. Defaults to enabled
+ * (missing table/row or read error) to preserve behaviour when the control
+ * plane hasn't written a setting yet.
+ */
+const SETTING_TTL_MS = 5000
+let webSearchCache: { value: boolean; at: number } | undefined
+export function isWebSearchEnabledSetting(): boolean {
+  const now = Date.now()
+  if (webSearchCache && now - webSearchCache.at < SETTING_TTL_MS) {
+    return webSearchCache.value
+  }
+  let value = true
+  try {
+    const row = getDb()
+      .query<{ value: string }, [string]>(
+        "SELECT value FROM settings WHERE key = ? LIMIT 1",
+      )
+      .get("web_search_enabled")
+    if (row) value = row.value !== "0"
+  } catch {
+    value = true
+  }
+  webSearchCache = { value, at: now }
+  return value
+}
+
 export type TenantResolution =
   | {
       ok: true

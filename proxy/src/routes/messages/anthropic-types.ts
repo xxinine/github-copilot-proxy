@@ -110,7 +110,45 @@ export type AnthropicMessage = AnthropicUserMessage | AnthropicAssistantMessage
 export interface AnthropicTool {
   name: string
   description?: string
-  input_schema: Record<string, unknown>
+  /**
+   * Present on client-defined tools. Anthropic-hosted *server* tools (e.g.
+   * `web_search_20250305`) carry a `type` and omit `input_schema`, so this is
+   * optional to accommodate both shapes.
+   */
+  input_schema?: Record<string, unknown>
+  /**
+   * Anthropic server-tool discriminator, e.g. `"web_search_20250305"`.
+   * Absent for ordinary client tools.
+   */
+  type?: string
+  /** `web_search` server tool: max number of searches per request. */
+  max_uses?: number
+}
+
+/**
+ * Anthropic `server_tool_use` block — emitted when the model invokes an
+ * Anthropic-hosted tool (here: web search executed by the proxy).
+ */
+export interface AnthropicServerToolUseBlock {
+  type: "server_tool_use"
+  id: string
+  name: "web_search"
+  input: Record<string, unknown>
+}
+
+export interface AnthropicWebSearchResultItem {
+  type: "web_search_result"
+  url: string
+  title: string
+  encrypted_content: string
+  page_age?: string
+}
+
+/** Anthropic `web_search_tool_result` block — the search results. */
+export interface AnthropicWebSearchToolResultBlock {
+  type: "web_search_tool_result"
+  tool_use_id: string
+  content: Array<AnthropicWebSearchResultItem>
 }
 
 export interface AnthropicResponse {

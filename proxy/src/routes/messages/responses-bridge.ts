@@ -37,7 +37,7 @@ export function translateAnthropicMessagesToResponses(
       type: "function",
       name: tool.name,
       description: tool.description,
-      parameters: tool.input_schema,
+      parameters: tool.input_schema ?? {},
     })),
     tool_choice: translateToolChoice(payload.tool_choice),
   }

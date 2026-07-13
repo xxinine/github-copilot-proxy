@@ -11,6 +11,7 @@ import {
   encryptSecret,
   generateApiKey,
   getAccountByUser,
+  getSetting,
   getUserById,
   getUserByName,
   listApiKeys,
@@ -19,6 +20,7 @@ import {
   recentUsage,
   revokeApiKey,
   setAccountStatus,
+  setSetting,
   setUserStatus,
   upsertAccount,
   usageByModel,
@@ -37,6 +39,7 @@ import { checkCopilotAccess } from './copilotCheck.js';
 import { startHealthMonitor } from './health.js';
 import {
   adminPage,
+  adminSettingsPage,
   adminUsagePage,
   adminUserPage,
   adminUserUsagePage,
@@ -289,6 +292,24 @@ app.post('/restart', requireAuth, async (req, res) => {
 app.get('/admin', requireAuth, requireAdmin, (req, res) => {
   const user = (req as Request & { user: User }).user;
   res.send(adminPage(user, listUsers(), listAccounts()));
+});
+
+app.get('/admin/settings', requireAuth, requireAdmin, (req, res) => {
+  const user = (req as Request & { user: User }).user;
+  res.send(
+    adminSettingsPage(user, {
+      webSearchConfigured: Boolean(process.env.WEBIQ_X_APIKEY),
+      // Default ON when no explicit setting has been saved, so the toggle does
+      // not change existing behaviour for deployments that configured the key.
+      webSearchEnabled: getSetting('web_search_enabled') !== '0',
+    })
+  );
+});
+
+app.post('/admin/settings/web-search', requireAuth, requireAdmin, (req, res) => {
+  const enabled = (req.body as { enabled?: string }).enabled === '1';
+  setSetting('web_search_enabled', enabled ? '1' : '0');
+  res.redirect('/admin/settings');
 });
 
 app.get('/admin/usage', requireAuth, requireAdmin, (req, res) => {

@@ -20,7 +20,8 @@ type NavKey =
   | 'usage'
   | 'examples'
   | 'admin-users'
-  | 'admin-usage';
+  | 'admin-usage'
+  | 'admin-settings';
 
 function sidebar(user: User, active?: NavKey): string {
   const link = (href: string, key: NavKey, label: string): string =>
@@ -28,7 +29,8 @@ function sidebar(user: User, active?: NavKey): string {
   const adminLinks = user.is_admin
     ? `<div class="navgroup">Admin</div>
       ${link('/admin', 'admin-users', 'Users')}
-      ${link('/admin/usage', 'admin-usage', 'All usage')}`
+      ${link('/admin/usage', 'admin-usage', 'All usage')}
+      ${link('/admin/settings', 'admin-settings', 'Settings')}`
     : '';
   return `<aside class="sidebar">
     <div class="brand">Copilot Proxy</div>
@@ -320,6 +322,38 @@ export function adminPage(user: User, users: User[], accounts: Account[]): strin
     </div>`,
     user,
     'admin-users'
+  );
+}
+
+export function adminSettingsPage(
+  user: User,
+  settings: { webSearchConfigured: boolean; webSearchEnabled: boolean }
+): string {
+  const { webSearchConfigured, webSearchEnabled } = settings;
+  let pill: string;
+  if (!webSearchConfigured) {
+    pill = '<span class="pill err">unavailable</span>';
+  } else if (webSearchEnabled) {
+    pill = '<span class="pill ok">on</span>';
+  } else {
+    pill = '<span class="pill err">off</span>';
+  }
+  const toggle = webSearchEnabled
+    ? `<form class="inline" method="post" action="/admin/settings/web-search"><input type="hidden" name="enabled" value="0"><button class="secondary">Disable</button></form>`
+    : `<form class="inline" method="post" action="/admin/settings/web-search"><input type="hidden" name="enabled" value="1"><button class="secondary">Enable</button></form>`;
+  const note = webSearchConfigured
+    ? ''
+    : `<p class="muted" style="margin:.4rem 0 0">Set <code>WEBIQ_X_APIKEY</code> in the proxy environment to activate. The toggle sets policy but has no effect until a search provider is configured.</p>`;
+  return layout(
+    'Settings',
+    `<div class="card">
+      <h2 style="margin-top:0">Claude web search</h2>
+      <p style="margin:0 0 .5rem">Serve the Anthropic <code>web_search</code> tool via the proxy <span style="margin-left:.5rem">${pill}</span></p>
+      ${toggle}
+      ${note}
+    </div>`,
+    user,
+    'admin-settings'
   );
 }
 

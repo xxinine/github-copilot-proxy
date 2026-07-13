@@ -42,6 +42,12 @@ import {
   translateChunkToAnthropicEvents,
   translateErrorToAnthropicErrorEvent,
 } from "./stream-translation"
+import {
+  findWebSearchServerTool,
+  handleWebSearchCompletion,
+} from "./web-search-handler"
+import { isWebSearchEnabledSetting } from "~/cpx/tenant-db"
+import { isWebSearchConfigured } from "~/lib/web-search"
 
 /** Heartbeat interval for SSE keepalive. Claude Code's idle timeout is 90s
  *  (CLAUDE_STREAM_IDLE_TIMEOUT_MS); 15s gives a 6× safety margin. */
@@ -103,6 +109,25 @@ export async function handleCompletion(c: Context) {
   const preprocessed = await preprocessAnthropicPayload(anthropicPayload)
   const openAIPayload = translateToOpenAI(preprocessed)
   const model = state.models?.data.find((m) => m.id === openAIPayload.model)
+
+  // Native-style web search: if the client requested the Anthropic `web_search`
+  // server tool and a provider is configured, run the search internally so the
+  // model returns a grounded answer in one request (Copilot has no native web
+  // search). Skip for responses-only models (handled via the Responses bridge).
+  const webSearchTool = findWebSearchServerTool(preprocessed)
+  if (
+    webSearchTool
+    && isWebSearchConfigured()
+    && isWebSearchEnabledSetting()
+    && !shouldUseResponsesForMessages(model)
+  ) {
+    return await handleWebSearchCompletion(
+      c,
+      preprocessed,
+      { clientModel, requestId },
+      webSearchTool,
+    )
+  }
 
   if (shouldUseResponsesForMessages(model)) {
     return await handleResponsesMessages(c, preprocessed, {

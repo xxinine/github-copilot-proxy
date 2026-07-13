@@ -75,6 +75,12 @@ function migrate(d: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_usage_user_ts ON usage_logs(user_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_logs(created_at);
     CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_logs(model);
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   // Backfill: add users.status to databases created before this column existed.
@@ -116,6 +122,23 @@ function migrate(d: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_logs(created_at);
     CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_logs(model);
   `);
+}
+
+// --- settings (global key/value) ---
+export function getSetting(key: string): string | undefined {
+  const row = getDb().prepare('SELECT value FROM settings WHERE key = ?').get(key) as
+    | { value: string }
+    | undefined;
+  return row?.value;
+}
+
+export function setSetting(key: string, value: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
+    )
+    .run(key, value);
 }
 
 // --- users ---
